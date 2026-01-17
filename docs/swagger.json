@@ -1,0 +1,522 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "API for synchronizing LDAP entries between two servers.",
+        "title": "ldap-sync API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "host": "localhost:5500",
+    "basePath": "/",
+    "paths": {
+        "/healthz": {
+            "get": {
+                "description": "Returns OK if the application is running.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Liveness Probe",
+                "responses": {
+                    "200": {
+                        "description": "status: ok",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/hook": {
+            "post": {
+                "description": "Process incoming LDAP hook payloads to transform data,",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "hook"
+                ],
+                "summary": "Process LDAP hook payload",
+                "parameters": [
+                    {
+                        "description": "LDAP Hook Payload",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/main.HookRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.HookResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/loglevel": {
+            "get": {
+                "description": "Returns the current log level.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "log"
+                ],
+                "summary": "Get current log level",
+                "responses": {
+                    "200": {
+                        "description": "current log level",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "description": "Update the logging level at runtime.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "log"
+                ],
+                "summary": "Update log level",
+                "parameters": [
+                    {
+                        "description": "New log level",
+                        "name": "level",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/main.LogLevelRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Updated log level",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid payload or log level",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/readyz": {
+            "get": {
+                "description": "Returns OK if the application is ready to serve traffic.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "probes"
+                ],
+                "summary": "Readiness Probe",
+                "responses": {
+                    "200": {
+                        "description": "status: ready",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/results/{id}": {
+            "get": {
+                "description": "Retrieves all LDAP objects for a given search id.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "results"
+                ],
+                "summary": "Get search results",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Unique search id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Return full result (DN and content) if true, else only DN",
+                        "name": "full",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "When full is true",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/main.ResultEntryFull"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Search results not found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/search": {
+            "get": {
+                "description": "Retrieves a specific search by id if provided, or all searches if no id is specified.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "search"
+                ],
+                "summary": "Get search(s)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Search ID",
+                        "name": "id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "When id is provided\" or {array} SearchInfo \"When id is not provided",
+                        "schema": {
+                            "$ref": "#/definitions/main.SearchInfo"
+                        }
+                    },
+                    "404": {
+                        "description": "Search not found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Creates a new search with a unique id. Returns an error if the id already exists.",
+                "consumes": [
+                    "application/x-www-form-urlencoded"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "search"
+                ],
+                "summary": "Create new search",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Unique search id",
+                        "name": "id",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "LDAP search filter",
+                        "name": "filter",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Refresh interval in seconds",
+                        "name": "refresh",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional base DN for the search; defaults to global config if omitted",
+                        "name": "baseDN",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "If set to true, the search will run in one-shot mode (hook subsystem will not be engaged). Defaults to true.",
+                        "name": "oneShot",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Search created",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid parameters or search already exists",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/search/{id}": {
+            "put": {
+                "description": "Updates an existing search (complete replacement) with new filter, refresh, and optionally baseDN. If baseDN is omitted, the global config's BaseDN is used.",
+                "consumes": [
+                    "application/x-www-form-urlencoded"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "search"
+                ],
+                "summary": "Update existing search",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Unique search id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "LDAP search filter",
+                        "name": "filter",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Refresh interval in seconds",
+                        "name": "refresh",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Optional base DN for the search; defaults to global config if omitted",
+                        "name": "baseDN",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "If set to true, the search will run in one-shot mode (hook subsystem will not be engaged). Defaults to true.",
+                        "name": "oneShot",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Search updated",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid parameters or search does not exist",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Deletes an existing search by its unique id.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "search"
+                ],
+                "summary": "Delete search",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Unique search id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Search deleted",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Search not found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.DerivedSearchSpec": {
+            "type": "object",
+            "properties": {
+                "baseDN": {
+                    "type": "string"
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "oneshot": {
+                    "type": "boolean"
+                },
+                "refresh": {
+                    "type": "integer"
+                }
+            }
+        },
+        "main.HookRequest": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "description": "Content is a JSON object representing LDAP attributes.",
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "description": "DN is the distinguished name of the LDAP entry.\nexample: cn=unc:app:renci:ordrd-example,ou=Groups,dc=unc,dc=edu",
+                    "type": "string"
+                }
+            }
+        },
+        "main.HookResponse": {
+            "type": "object",
+            "properties": {
+                "derived": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/main.DerivedSearchSpec"
+                    }
+                },
+                "reset": {
+                    "type": "boolean"
+                },
+                "transformed": {
+                    "$ref": "#/definitions/main.TransformedEntry"
+                }
+            }
+        },
+        "main.LogLevelRequest": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.ResultEntryFull": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.ResultEntrySimple": {
+            "type": "object",
+            "properties": {
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.SearchInfo": {
+            "type": "object",
+            "properties": {
+                "baseDN": {
+                    "type": "string"
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "oneshot": {
+                    "type": "boolean"
+                },
+                "refresh": {
+                    "type": "integer"
+                }
+            }
+        },
+        "main.TransformedEntry": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ldap-sync.fullname" . }}-config
+  labels:
+    {{- include "ldap-sync.labels" . | nindent 4 }}
+data:
+  config.yaml: |-
+    {{- if .Values.config.hooks }}
+    hooks:
+    {{- range .Values.config.hooks }}
+      {{- if .url }}
+      - {{ .url }}
+      {{- end }}
+    {{- end }}
+    {{- else }}
+    hooks: []
+    {{- end }}
+    source:
+      url: {{ .Values.config.source.url | quote }}
+      bind_dn: {{ .Values.config.source.bindDN | quote }}
+      bind_password: {{ .Values.config.source.bindPassword | quote }}
+      base_dn: {{ .Values.config.source.baseDN | quote }}
+    target:
+      url: {{ .Values.config.target.url | quote }}
+      bind_dn: {{ .Values.config.target.bindDN | quote }}
+      bind_password: {{ .Values.config.target.bindPassword | quote }}
+      base_dn: {{ .Values.config.target.baseDN | quote }}

@@ -1,0 +1,56 @@
+definitions:
+  main.DerivedSearch:
+    properties:
+      baseDN:
+        type: string
+      filter:
+        type: string
+      id:
+        type: string
+      oneshot:
+        type: boolean
+      refresh:
+        type: integer
+    type: object
+  main.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+  main.HookResponse:
+    properties:
+      derived:
+        items:
+          $ref: '#/definitions/main.DerivedSearch'
+        type: array
+      reset:
+        type: boolean
+      transformed: {}
+    type: object
+info:
+  contact: {}
+paths:
+  /hook:
+    post:
+      consumes:
+      - application/json
+      description: Process and transform LDAP entries based on their type.
+      parameters:
+      - description: LDAP Hook Payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/main.HookRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.HookResponse'
+      summary: Process LDAP hook payload
+swagger: "2.0"

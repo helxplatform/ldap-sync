@@ -1,0 +1,356 @@
+basePath: /
+definitions:
+  main.DerivedSearchSpec:
+    properties:
+      baseDN:
+        type: string
+      filter:
+        type: string
+      id:
+        type: string
+      oneshot:
+        type: boolean
+      refresh:
+        type: integer
+    type: object
+  main.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        description: Content is a JSON object representing LDAP attributes.
+        type: object
+      dn:
+        description: |-
+          DN is the distinguished name of the LDAP entry.
+          example: cn=unc:app:renci:ordrd-example,ou=Groups,dc=unc,dc=edu
+        type: string
+    type: object
+  main.HookResponse:
+    properties:
+      derived:
+        items:
+          $ref: '#/definitions/main.DerivedSearchSpec'
+        type: array
+      reset:
+        type: boolean
+      transformed:
+        $ref: '#/definitions/main.TransformedEntry'
+    type: object
+  main.LogLevelRequest:
+    properties:
+      level:
+        type: string
+    type: object
+  main.ResultEntryFull:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+  main.ResultEntrySimple:
+    properties:
+      dn:
+        type: string
+    type: object
+  main.SearchInfo:
+    properties:
+      baseDN:
+        type: string
+      filter:
+        type: string
+      id:
+        type: string
+      oneshot:
+        type: boolean
+      refresh:
+        type: integer
+    type: object
+  main.TransformedEntry:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+host: localhost:5500
+info:
+  contact: {}
+  description: API for synchronizing LDAP entries between two servers.
+  title: ldap-sync API
+  version: "1.0"
+paths:
+  /healthz:
+    get:
+      description: Returns OK if the application is running.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'status: ok'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness Probe
+      tags:
+      - probes
+  /hook:
+    post:
+      consumes:
+      - application/json
+      description: Process incoming LDAP hook payloads to transform data,
+      parameters:
+      - description: LDAP Hook Payload
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/main.HookRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/main.HookResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Process LDAP hook payload
+      tags:
+      - hook
+  /loglevel:
+    get:
+      description: Returns the current log level.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: current log level
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get current log level
+      tags:
+      - log
+    put:
+      consumes:
+      - application/json
+      description: Update the logging level at runtime.
+      parameters:
+      - description: New log level
+        in: body
+        name: level
+        required: true
+        schema:
+          $ref: '#/definitions/main.LogLevelRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Updated log level
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Invalid payload or log level
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Update log level
+      tags:
+      - log
+  /readyz:
+    get:
+      description: Returns OK if the application is ready to serve traffic.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 'status: ready'
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Readiness Probe
+      tags:
+      - probes
+  /results/{id}:
+    get:
+      description: Retrieves all LDAP objects for a given search id.
+      parameters:
+      - description: Unique search id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Return full result (DN and content) if true, else only DN
+        in: query
+        name: full
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: When full is true
+          schema:
+            items:
+              $ref: '#/definitions/main.ResultEntryFull'
+            type: array
+        "404":
+          description: Search results not found
+          schema:
+            type: string
+      summary: Get search results
+      tags:
+      - results
+  /search:
+    get:
+      consumes:
+      - application/json
+      description: Retrieves a specific search by id if provided, or all searches
+        if no id is specified.
+      parameters:
+      - description: Search ID
+        in: query
+        name: id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: When id is provided" or {array} SearchInfo "When id is not
+            provided
+          schema:
+            $ref: '#/definitions/main.SearchInfo'
+        "404":
+          description: Search not found
+          schema:
+            type: string
+      summary: Get search(s)
+      tags:
+      - search
+    post:
+      consumes:
+      - application/x-www-form-urlencoded
+      description: Creates a new search with a unique id. Returns an error if the
+        id already exists.
+      parameters:
+      - description: Unique search id
+        in: formData
+        name: id
+        required: true
+        type: string
+      - description: LDAP search filter
+        in: formData
+        name: filter
+        required: true
+        type: string
+      - description: Refresh interval in seconds
+        in: formData
+        name: refresh
+        required: true
+        type: integer
+      - description: Optional base DN for the search; defaults to global config if
+          omitted
+        in: formData
+        name: baseDN
+        type: string
+      - description: If set to true, the search will run in one-shot mode (hook subsystem
+          will not be engaged). Defaults to true.
+        in: formData
+        name: oneShot
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Search created
+          schema:
+            type: string
+        "400":
+          description: Invalid parameters or search already exists
+          schema:
+            type: string
+      summary: Create new search
+      tags:
+      - search
+  /search/{id}:
+    delete:
+      description: Deletes an existing search by its unique id.
+      parameters:
+      - description: Unique search id
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Search deleted
+          schema:
+            type: string
+        "404":
+          description: Search not found
+          schema:
+            type: string
+      summary: Delete search
+      tags:
+      - search
+    put:
+      consumes:
+      - application/x-www-form-urlencoded
+      description: Updates an existing search (complete replacement) with new filter,
+        refresh, and optionally baseDN. If baseDN is omitted, the global config's
+        BaseDN is used.
+      parameters:
+      - description: Unique search id
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: LDAP search filter
+        in: formData
+        name: filter
+        required: true
+        type: string
+      - description: Refresh interval in seconds
+        in: formData
+        name: refresh
+        required: true
+        type: integer
+      - description: Optional base DN for the search; defaults to global config if
+          omitted
+        in: formData
+        name: baseDN
+        type: string
+      - description: If set to true, the search will run in one-shot mode (hook subsystem
+          will not be engaged). Defaults to true.
+        in: formData
+        name: oneShot
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Search updated
+          schema:
+            type: string
+        "400":
+          description: Invalid parameters or search does not exist
+          schema:
+            type: string
+      summary: Update existing search
+      tags:
+      - search
+swagger: "2.0"
