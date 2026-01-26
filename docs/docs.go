@@ -40,15 +40,12 @@ const docTemplate = `{
         },
         "/hook": {
             "post": {
-                "description": "Process incoming LDAP hook payloads to transform data,",
+                "description": "Process and transform LDAP entries based on their type.",
                 "consumes": [
                     "application/json"
                 ],
                 "produces": [
                     "application/json"
-                ],
-                "tags": [
-                    "hook"
                 ],
                 "summary": "Process LDAP hook payload",
                 "parameters": [
@@ -58,7 +55,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/main.HookRequest"
+                            "$ref": "#/definitions/main_hooks_unc-group-x.HookRequest"
                         }
                     }
                 ],
@@ -67,15 +64,6 @@ const docTemplate = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/main.HookResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
                         }
                     }
                 }
@@ -433,23 +421,15 @@ const docTemplate = `{
                 }
             }
         },
-        "main.HookRequest": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "description": "Content is a JSON object representing LDAP attributes.",
-                    "type": "object",
-                    "additionalProperties": true
-                },
-                "dn": {
-                    "description": "DN is the distinguished name of the LDAP entry.\nexample: cn=unc:app:renci:ordrd-example,ou=Groups,dc=unc,dc=edu",
-                    "type": "string"
-                }
-            }
-        },
         "main.HookResponse": {
             "type": "object",
             "properties": {
+                "dependencies": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "derived": {
                     "type": "array",
                     "items": {
@@ -513,6 +493,30 @@ const docTemplate = `{
             }
         },
         "main.TransformedEntry": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "main_hooks_ordrd-group-x.HookRequest": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "main_hooks_unc-group-x.HookRequest": {
             "type": "object",
             "properties": {
                 "content": {

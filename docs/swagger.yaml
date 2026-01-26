@@ -13,20 +13,12 @@ definitions:
       refresh:
         type: integer
     type: object
-  main.HookRequest:
-    properties:
-      content:
-        additionalProperties: true
-        description: Content is a JSON object representing LDAP attributes.
-        type: object
-      dn:
-        description: |-
-          DN is the distinguished name of the LDAP entry.
-          example: cn=unc:app:renci:ordrd-example,ou=Groups,dc=unc,dc=edu
-        type: string
-    type: object
   main.HookResponse:
     properties:
+      dependencies:
+        items:
+          type: string
+        type: array
       derived:
         items:
           $ref: '#/definitions/main.DerivedSearchSpec'
@@ -75,6 +67,22 @@ definitions:
       dn:
         type: string
     type: object
+  main_hooks_ordrd-group-x.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+  main_hooks_unc-group-x.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
 host: localhost:5500
 info:
   contact: {}
@@ -101,14 +109,14 @@ paths:
     post:
       consumes:
       - application/json
-      description: Process incoming LDAP hook payloads to transform data,
+      description: Process and transform LDAP entries based on their type.
       parameters:
       - description: LDAP Hook Payload
         in: body
         name: payload
         required: true
         schema:
-          $ref: '#/definitions/main.HookRequest'
+          $ref: '#/definitions/main_hooks_unc-group-x.HookRequest'
       produces:
       - application/json
       responses:
@@ -116,15 +124,7 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/main.HookResponse'
-        "400":
-          description: Bad Request
-          schema:
-            additionalProperties:
-              type: string
-            type: object
       summary: Process LDAP hook payload
-      tags:
-      - hook
   /loglevel:
     get:
       description: Returns the current log level.

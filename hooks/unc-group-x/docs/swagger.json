@@ -1,0 +1,100 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "contact": {}
+    },
+    "paths": {
+        "/hook": {
+            "post": {
+                "description": "Process and transform LDAP entries based on their type.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Process LDAP hook payload",
+                "parameters": [
+                    {
+                        "description": "LDAP Hook Payload",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/main.HookRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/main.HookResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "main.DerivedSearch": {
+            "type": "object",
+            "properties": {
+                "baseDN": {
+                    "type": "string"
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "oneshot": {
+                    "type": "boolean"
+                },
+                "refresh": {
+                    "type": "integer"
+                }
+            }
+        },
+        "main.HookRequest": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "main.HookResponse": {
+            "type": "object",
+            "properties": {
+                "bindings": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "derived": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/main.DerivedSearch"
+                    }
+                },
+                "reset": {
+                    "type": "boolean"
+                },
+                "transformed": {}
+            }
+        }
+    }
+}

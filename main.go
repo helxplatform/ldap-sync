@@ -511,6 +511,20 @@ func processHookResponse(hookResp HookResponse) {
 	}
 }
 
+func decodeHookResponses(body []byte) ([]HookResponse, error) {
+	var responses []HookResponse
+	if err := json.Unmarshal(body, &responses); err == nil {
+		return responses, nil
+	}
+
+	var single HookResponse
+	if err := json.Unmarshal(body, &single); err == nil {
+		return []HookResponse{single}, nil
+	}
+
+	return nil, fmt.Errorf("invalid hook response: expected object or array")
+}
+
 // sendHooks posts the LDAP result to each URL specified in config.Hooks.
 func sendHooks(result LDAPResult) {
 	payload, err := json.Marshal(result)
@@ -533,13 +547,15 @@ func sendHooks(result LDAPResult) {
 				return
 			}
 
-			var hookResp HookResponse
-
-			if err := json.Unmarshal(body, &hookResp); err != nil {
-				logger.Error("Error unmarshalling hook response", "URL", hookURL, "Err", err)
+			hookResps, err := decodeHookResponses(body)
+			if err != nil {
+				logger.Error("Hook response decode failed", "URL", hookURL, "Err", err)
 				return
 			}
-			processHookResponse(hookResp)
+
+			for _, hookResp := range hookResps {
+				processHookResponse(hookResp)
+			}
 		}(url)
 	}
 }
