@@ -226,6 +226,7 @@ func processUNCUser(req HookRequest) HookResponse {
 		"objectClass":   []string{"top", "inetOrgPerson", "posixAccount", "helxUser"},
 		"ou":            "users",
 		"sn":            req.Content["sn"],
+		"supplementalGroups": []interface{}{"0"},
 		"uid":           uid,
 		"uidNumber":     req.Content["uidNumber"],
 	}
