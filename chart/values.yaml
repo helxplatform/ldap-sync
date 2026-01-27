@@ -80,6 +80,10 @@ affinity: {}
 loglevel: "info"
 config:
   hooks: []
+  hookRetry:
+    maxRetries: 10
+    initialDelayMs: 100
+    maxDelayMs: 30000
   source:
     url: ""
     bindDN: "cn=admin,dc=example,dc=org"
@@ -90,3 +94,27 @@ config:
     bindDN: "cn=admin,dc=example,dc=org"
     bindPassword: ""
     baseDN: "dc=example,dc=org"
+
+# PostgreSQL configuration
+postgres:
+  enabled: true
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+  auth:
+    # Username for the database
+    username: ldapsync
+    # Database name
+    database: ldapsync
+    # Use the auto-generated secret with lookup function for password persistence
+    # IMPORTANT: Set this to "<your-release-name>-postgres" on install
+    # Example: --set postgres.auth.existingSecret=my-release-postgres
+    # For release name "ldap-sync", this default works
+    existingSecret: "ldap-sync-postgres"
+    secretKeys:
+      adminPasswordKey: postgres-password
+  # SSL mode for PostgreSQL connection (disable, require, verify-ca, verify-full)
+  sslmode: disable
+  # Additional PostgreSQL configuration can be added here
+  # For example, resource limits, custom configuration, etc.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-ldap/ldap/v3"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	_ "github.com/lib/pq"
 	echoSwagger "github.com/swaggo/echo-swagger"
 	"gopkg.in/yaml.v2"
 )
@@ -32,11 +34,31 @@ type LDAPConfig struct {
 	BaseDN       string `yaml:"base_dn"`
 }
 
+// DatabaseConfig holds database connection details.
+type DatabaseConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Host         string `yaml:"host"`
+	Port         int    `yaml:"port"`
+	Username     string `yaml:"username"`
+	Database     string `yaml:"database"`
+	PasswordFile string `yaml:"password_file"`
+	SSLMode      string `yaml:"sslmode"`
+}
+
+// HookRetryConfig holds retry configuration for hook requests.
+type HookRetryConfig struct {
+	MaxRetries    int `yaml:"max_retries"`
+	InitialDelayMs int `yaml:"initial_delay_ms"`
+	MaxDelayMs    int `yaml:"max_delay_ms"`
+}
+
 // Config holds the configuration for both source and target LDAP servers.
 type Config struct {
-	Source LDAPConfig `yaml:"source"`
-	Target LDAPConfig `yaml:"target"`
-	Hooks  []string   `yaml:"hooks"`
+	Source    LDAPConfig      `yaml:"source"`
+	Target    LDAPConfig      `yaml:"target"`
+	Hooks     []string        `yaml:"hooks"`
+	Database  DatabaseConfig  `yaml:"database"`
+	HookRetry HookRetryConfig `yaml:"hook_retry"`
 }
 
 // SearchSpec represents a running search instance.
@@ -112,6 +134,7 @@ var mergeAttributes = map[string]struct{}{
 	"memberuid": {},
 }
 var dnLocks sync.Map
+var db *sql.DB
 
 type pendingEntry struct {
 	entry *TransformedEntry
@@ -144,6 +167,131 @@ func getDNLock(dn string) *sync.Mutex {
 	}
 	lock, _ := dnLocks.LoadOrStore(key, &sync.Mutex{})
 	return lock.(*sync.Mutex)
+}
+
+// initDB initializes the database connection and creates the searches table if it doesn't exist.
+func initDB(dbConfig DatabaseConfig) error {
+	// Read password from file
+	passwordBytes, err := os.ReadFile(dbConfig.PasswordFile)
+	if err != nil {
+		return fmt.Errorf("failed to read database password file: %w", err)
+	}
+	password := strings.TrimSpace(string(passwordBytes))
+
+	// Set default SSL mode if not specified
+	sslMode := dbConfig.SSLMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+
+	// Set default port if not specified
+	port := dbConfig.Port
+	if port == 0 {
+		port = 5432
+	}
+
+	// Build connection string
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+		dbConfig.Username,
+		password,
+		dbConfig.Host,
+		port,
+		dbConfig.Database,
+		sslMode,
+	)
+
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Test the connection
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	logger.Info("Database connection established successfully")
+	return nil
+}
+
+// saveSearchToDB saves a search specification to the database.
+func saveSearchToDB(id string, spec *SearchSpec) error {
+	if db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	insertSQL := `
+	INSERT INTO searches (id, filter, refresh, base_dn, oneshot, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+	ON CONFLICT (id) DO UPDATE
+	SET filter = $2, refresh = $3, base_dn = $4, oneshot = $5, updated_at = NOW();`
+
+	_, err := db.Exec(insertSQL, id, spec.Filter, spec.Refresh, spec.BaseDN, spec.Oneshot)
+	if err != nil {
+		return fmt.Errorf("failed to save search to database: %w", err)
+	}
+
+	logger.Debug("Search saved to database", "SearchId", id)
+	return nil
+}
+
+// loadSearchesFromDB loads all saved searches from the database.
+func loadSearchesFromDB() (map[string]*SearchSpec, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	selectSQL := `SELECT id, filter, refresh, base_dn, oneshot FROM searches;`
+	rows, err := db.Query(selectSQL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query searches: %w", err)
+	}
+	defer rows.Close()
+
+	loadedSearches := make(map[string]*SearchSpec)
+	for rows.Next() {
+		var id, filter, baseDN string
+		var refresh int
+		var oneshot bool
+
+		if err := rows.Scan(&id, &filter, &refresh, &baseDN, &oneshot); err != nil {
+			logger.Error("Error scanning search row", "Err", err)
+			continue
+		}
+
+		stopChan := make(chan struct{})
+		spec := &SearchSpec{
+			Filter:  filter,
+			Refresh: refresh,
+			BaseDN:  baseDN,
+			Oneshot: oneshot,
+			Stop:    stopChan,
+		}
+		loadedSearches[id] = spec
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating search rows: %w", err)
+	}
+
+	logger.Info("Loaded searches from database", "Count", len(loadedSearches))
+	return loadedSearches, nil
+}
+
+// deleteSearchFromDB deletes a search from the database.
+func deleteSearchFromDB(id string) error {
+	if db == nil {
+		return fmt.Errorf("database not initialized")
+	}
+
+	deleteSQL := `DELETE FROM searches WHERE id = $1;`
+	_, err := db.Exec(deleteSQL, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete search from database: %w", err)
+	}
+
+	logger.Debug("Search deleted from database", "SearchId", id)
+	return nil
 }
 
 func isMergeAttr(attr string) bool {
@@ -686,6 +834,59 @@ func decodeHookResponses(body []byte) ([]HookResponse, error) {
 	return nil, fmt.Errorf("invalid hook response: expected object or array")
 }
 
+// postToHookWithRetry posts to a hook URL with exponential backoff retry logic.
+func postToHookWithRetry(hookURL string, payload []byte) (*http.Response, error) {
+	const backoffFactor = 2.0
+
+	// Get retry configuration with defaults
+	maxRetries := config.HookRetry.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 10
+	}
+	initialDelayMs := config.HookRetry.InitialDelayMs
+	if initialDelayMs == 0 {
+		initialDelayMs = 100
+	}
+	maxDelayMs := config.HookRetry.MaxDelayMs
+	if maxDelayMs == 0 {
+		maxDelayMs = 30000
+	}
+
+	initialDelay := time.Duration(initialDelayMs) * time.Millisecond
+	maxDelay := time.Duration(maxDelayMs) * time.Millisecond
+
+	var lastErr error
+	delay := initialDelay
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Add jitter to prevent thundering herd (±10%)
+			jitter := time.Duration(float64(delay) * 0.1)
+			sleepTime := delay + time.Duration(float64(jitter)*(2.0*float64(time.Now().UnixNano()%1000)/1000.0-1.0))
+			logger.Debug("Retrying hook request", "URL", hookURL, "Attempt", attempt+1, "Delay", sleepTime)
+			time.Sleep(sleepTime)
+
+			// Exponential backoff with cap
+			delay = time.Duration(float64(delay) * backoffFactor)
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+
+		resp, err := http.Post(hookURL, "application/json", bytes.NewBuffer(payload))
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+		if attempt < maxRetries {
+			logger.Warn("Hook request failed, will retry", "URL", hookURL, "Attempt", attempt+1, "Err", err)
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d attempts: %w", maxRetries+1, lastErr)
+}
+
 // sendHooks posts the LDAP result to each URL specified in config.Hooks.
 func sendHooks(result LDAPResult) {
 	payload, err := json.Marshal(result)
@@ -696,9 +897,9 @@ func sendHooks(result LDAPResult) {
 	for _, url := range config.Hooks {
 		// Launch each hook call concurrently.
 		go func(hookURL string) {
-			resp, err := http.Post(hookURL, "application/json", bytes.NewBuffer(payload))
+			resp, err := postToHookWithRetry(hookURL, payload)
 			if err != nil {
-				logger.Error("Error posting to hook", "URL", hookURL, "Err", err)
+				logger.Error("Error posting to hook after retries", "URL", hookURL, "Err", err)
 				return
 			}
 			defer resp.Body.Close()
@@ -840,6 +1041,13 @@ func createSearchHandler(c echo.Context) error {
 	searchResultsMu.Lock()
 	searchResults[id] = make(map[string]LDAPResult)
 	searchResultsMu.Unlock()
+
+	// Save to database
+	if err := saveSearchToDB(id, spec); err != nil {
+		logger.Error("Failed to save search to database", "SearchId", id, "Err", err)
+		// Continue anyway - the search will still work, just won't persist
+	}
+
 	// Pass the oneshot flag to the search routine.
 	go ldapSearchAndSync(id, filter, baseDN, refresh, oneshot, stopChan)
 	return c.String(http.StatusOK, "Search created")
@@ -946,6 +1154,13 @@ func updateSearchHandler(c echo.Context) error {
 	spec.BaseDN = baseDN
 	spec.Oneshot = oneshot
 	spec.Stop = stopChan
+
+	// Update in database
+	if err := saveSearchToDB(id, spec); err != nil {
+		logger.Error("Failed to update search in database", "SearchId", id, "Err", err)
+		// Continue anyway
+	}
+
 	// Restart the search goroutine with the new oneshot flag.
 	go ldapSearchAndSync(id, filter, baseDN, refresh, oneshot, stopChan)
 	return c.String(http.StatusOK, "Search updated")
@@ -978,6 +1193,13 @@ func deleteSearchHandler(c echo.Context) error {
 	searchResultsMu.Lock()
 	delete(searchResults, id)
 	searchResultsMu.Unlock()
+
+	// Delete from database
+	if err := deleteSearchFromDB(id); err != nil {
+		logger.Error("Failed to delete search from database", "SearchId", id, "Err", err)
+		// Continue anyway - the search is already stopped and removed from memory
+	}
+
 	return c.String(http.StatusOK, "Search deleted")
 }
 
@@ -1112,6 +1334,38 @@ func main() {
 	if err := loadConfig("/etc/ldap-sync/config.yaml"); err != nil {
 		logger.Error("Error loading config", "Err", err)
 		os.Exit(1)
+	}
+
+	// Initialize database if enabled in config
+	if config.Database.Enabled {
+		if err := initDB(config.Database); err != nil {
+			logger.Error("Error initializing database", "Err", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		// Load saved searches from database
+		loadedSearches, err := loadSearchesFromDB()
+		if err != nil {
+			logger.Error("Error loading searches from database", "Err", err)
+			// Don't exit - continue with empty searches
+		} else {
+			// Restore searches and start their goroutines
+			searchesMu.Lock()
+			for id, spec := range loadedSearches {
+				searches[id] = spec
+				// Initialize results store for this search
+				searchResultsMu.Lock()
+				searchResults[id] = make(map[string]LDAPResult)
+				searchResultsMu.Unlock()
+				// Start the search goroutine
+				go ldapSearchAndSync(id, spec.Filter, spec.BaseDN, spec.Refresh, spec.Oneshot, spec.Stop)
+				logger.Info("Restored search from database", "SearchId", id)
+			}
+			searchesMu.Unlock()
+		}
+	} else {
+		logger.Info("Database persistence disabled, searches will not be persisted")
 	}
 
 	// Initialize Echo.
