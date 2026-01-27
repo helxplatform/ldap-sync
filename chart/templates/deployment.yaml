@@ -52,6 +52,11 @@ spec:
           volumeMounts:
             - name: config-volume
               mountPath: /etc/ldap-sync
+            {{- if .Values.postgres.enabled }}
+            - name: postgres-secret
+              mountPath: /etc/ldap-sync/secrets
+              readOnly: true
+            {{- end }}
         {{- if .Values.config.hooks }}
         {{- range $index,$hook := .Values.config.hooks }}
         - name: {{ $hook.name }}
@@ -67,6 +72,14 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "ldap-sync.fullname" . }}-config
+        {{- if .Values.postgres.enabled }}
+        - name: postgres-secret
+          secret:
+            secretName: {{ include "ldap-sync.fullname" . }}-postgres-credentials
+            items:
+              - key: password
+                path: postgres-password
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

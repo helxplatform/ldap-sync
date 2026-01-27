@@ -26,3 +26,16 @@ data:
       bind_dn: {{ .Values.config.target.bindDN | quote }}
       bind_password: {{ .Values.config.target.bindPassword | quote }}
       base_dn: {{ .Values.config.target.baseDN | quote }}
+    {{- if .Values.postgres.enabled }}
+    database:
+      enabled: true
+      host: {{ include "ldap-sync.fullname" . }}-postgres
+      port: 5432
+      username: {{ .Values.postgres.auth.username | quote }}
+      database: {{ .Values.postgres.auth.database | quote }}
+      password_file: "/etc/ldap-sync/secrets/postgres-password"
+      sslmode: {{ .Values.postgres.sslmode | default "disable" | quote }}
+    {{- else }}
+    database:
+      enabled: false
+    {{- end }}
