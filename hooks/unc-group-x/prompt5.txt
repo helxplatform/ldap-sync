@@ -45,8 +45,9 @@ The hook service must process the payload as follows:
    return a JSON response containing five keys:
 
    - **"transformed"**: This is the result of performing the transformation
-     logic on the contents. This can be `null` if there is no target
-     representation for the input entry.
+     logic on the contents. It must be an array of objects, with a single
+     item when a target representation exists. This can be `null` if there
+     is no target representation for the input entry.
 
    - **"derived"**: An array of additional search specifications. Each
      element in "derived" must be a JSON object that describes a search
@@ -130,7 +131,7 @@ process will wait until bindings are present to resolve the templates.
 #### Example1 Output
    
     {
-      "transformed": {
+      "transformed": [{
         "dn": "cn={{ groupname }},ou=groups,dc=example,dc=org",
         "content": {
           "cn": "{{ groupname }}",
@@ -146,7 +147,7 @@ process will wait until bindings are present to resolve the templates.
             "groupOfNames"
           ]
         }
-      },
+      }],
       "dependencies": [
         "uid=$pidUidMap.713272486,ou=users,dc=example,dc=org",
         "uid=$pidUidMap.709909262,ou=users,dc=example,dc=org",
@@ -256,7 +257,7 @@ application.  Assign the baseGid to all gidNumber
 #### Example2 Output
 
     {
-      "transformed": {
+      "transformed": [{
         "dn": "uid=kfecho,ou=users,dc=example,dc=org",
         "content": {
           "cn": "Karamarie Fecho",
@@ -275,7 +276,7 @@ application.  Assign the baseGid to all gidNumber
           "uid": "kfecho",
           "uidNumber": "6651"
         }
-      },
+      }],
       "dependencies": [],
       "derived": [{
         "id": "6651-posixGroups",
@@ -316,7 +317,7 @@ application.  Assign the baseGid to all gidNumber
 #### Example3 Output
 
   {
-    "transformed": {
+    "transformed": [{
       "dn": "cn=its_employee_psx,ou=groups,dc=example,dc=org",
       "content": {
         "cn": "its_employee_psx",
@@ -331,7 +332,7 @@ application.  Assign the baseGid to all gidNumber
         4350,
         9950
       ]
-    },
+    }],
     "dependencies": [],
     "derived": [],
     "bindings": {},
@@ -359,8 +360,10 @@ Your output should include the following artifacts:
    and DN to catch user errors, and decide what to do based on the content
    type.
 5. Return a JSON response with "transformed", "derived", "dependencies",
-   "bindings", and legacy "reset" as described. "Transformed" can be null
-   only when there is no target representation for the input entry.
+   "bindings", and legacy "reset" as described. "Transformed" must be an
+   array of objects, with a single item when a target representation
+   exists. It can be null only when there is no target representation for
+   the input entry.
 6. Clearly mark the location where the user may replace the sample
    transformation logic with their own code.
 

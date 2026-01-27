@@ -94,7 +94,7 @@ type TransformedEntry struct {
 
 // HookResponse represents the hook response JSON.
 type HookResponse struct {
-	Transformed  *TransformedEntry   `json:"transformed"`
+	Transformed  []TransformedEntry  `json:"transformed"`
 	Derived      []DerivedSearchSpec `json:"derived"`
 	Reset        bool                `json:"reset"`
 	Dependencies []string            `json:"dependencies"`
@@ -105,6 +105,8 @@ var logger *slog.Logger
 var currentLogLevel string
 var searches = make(map[string]*SearchSpec)
 var searchResults = make(map[string]map[string]LDAPResult)
+var searchesMu sync.RWMutex
+var searchResultsMu sync.RWMutex
 var dependencyTracker = newDependencyState()
 
 type pendingEntry struct {
@@ -463,16 +465,22 @@ func processHookResponse(hookResp HookResponse) {
 	logger.Debug("Processing Hook response", "Transformed", hookResp.Transformed, "Derived", hookResp.Derived, "Reset", hookResp.Reset)
 
 	// Process the transformed element (if present).
-	if hookResp.Transformed != nil {
-		logger.Debug("Processing transformed hook response for DN", "DN", hookResp.Transformed.DN)
-		dependencyTracker.handleEntry(hookResp.Transformed, hookResp.Dependencies)
+	if len(hookResp.Transformed) > 0 {
+		for i := range hookResp.Transformed {
+			transformed := hookResp.Transformed[i]
+			logger.Debug("Processing transformed hook response for DN", "DN", transformed.DN)
+			dependencyTracker.handleEntry(&transformed, hookResp.Dependencies)
+		}
 	} else {
 		logger.Info("No transformed data in hook response")
 	}
 
 	// Process each derived search provided.
 	for _, ds := range hookResp.Derived {
-		if spec, exists := searches[ds.ID]; exists {
+		searchesMu.RLock()
+		spec, exists := searches[ds.ID]
+		searchesMu.RUnlock()
+		if exists {
 			// Update existing search.
 			close(spec.Stop)
 			stopChan := make(chan struct{})
@@ -493,9 +501,13 @@ func processHookResponse(hookResp HookResponse) {
 				Oneshot: ds.Oneshot,
 				Stop:    stopChan,
 			}
+			searchesMu.Lock()
 			searches[ds.ID] = spec
+			searchesMu.Unlock()
 			// Initialize the structured results store for this search id.
+			searchResultsMu.Lock()
 			searchResults[ds.ID] = make(map[string]LDAPResult)
+			searchResultsMu.Unlock()
 			go ldapSearchAndSync(ds.ID, ds.Filter, ds.BaseDN, ds.Refresh, ds.Oneshot, stopChan)
 			logger.Info("Derived search created", "SearchId", ds.ID)
 		}
@@ -505,9 +517,11 @@ func processHookResponse(hookResp HookResponse) {
 		// TODO: Reset is a legacy workaround; dependency handling should eventually make this obsolete.
 		logger.Info("Reset directive received. Discarding internal search results")
 		// Clear all internal search results.
+		searchResultsMu.Lock()
 		for id := range searchResults {
 			searchResults[id] = make(map[string]LDAPResult)
 		}
+		searchResultsMu.Unlock()
 	}
 }
 
@@ -579,22 +593,41 @@ func processLDAPEntry(id string, entry *ldap.Entry, oneshot bool) {
 		Content: attrMap,
 	}
 
-	if existing, exists := searchResults[id][dn]; !exists {
-		searchResults[id][dn] = newResult
-		logger.Info("New item retrieved", "DN", dn, "SearchId", id)
-		if !oneshot {
-			sendHooks(newResult)
-		}
+	var shouldSend bool
+	var logMsg string
+
+	searchResultsMu.Lock()
+	results, ok := searchResults[id]
+	if !ok {
+		searchResultsMu.Unlock()
+		logger.Warn("Search results missing for id", "SearchId", id, "DN", dn)
+		return
+	}
+
+	if existing, exists := results[dn]; !exists {
+		results[dn] = newResult
+		logMsg = "New item retrieved"
+		shouldSend = !oneshot
 	} else {
 		if !reflect.DeepEqual(existing.Content, attrMap) {
-			searchResults[id][dn] = newResult
-			logger.Info("Updated item search", "DN", dn, "SearchId", id)
-			if !oneshot {
-				sendHooks(newResult)
-			}
+			results[dn] = newResult
+			logMsg = "Updated item search"
+			shouldSend = !oneshot
 		} else {
-			logger.Debug("No change", "DN", dn, "SearchId", id)
+			logMsg = "No change"
 		}
+	}
+	searchResultsMu.Unlock()
+
+	switch logMsg {
+	case "New item retrieved", "Updated item search":
+		logger.Info(logMsg, "DN", dn, "SearchId", id)
+	default:
+		logger.Debug(logMsg, "DN", dn, "SearchId", id)
+	}
+
+	if shouldSend {
+		sendHooks(newResult)
 	}
 }
 
@@ -623,7 +656,10 @@ func createSearchHandler(c echo.Context) error {
 	if id == "" || filter == "" || refreshStr == "" {
 		return c.String(http.StatusBadRequest, "Missing required parameters (id, filter, refresh)")
 	}
-	if _, exists := searches[id]; exists {
+	searchesMu.RLock()
+	_, exists := searches[id]
+	searchesMu.RUnlock()
+	if exists {
 		return c.String(http.StatusBadRequest, "Search with this id already exists")
 	}
 	refresh, err := strconv.Atoi(refreshStr)
@@ -650,9 +686,13 @@ func createSearchHandler(c echo.Context) error {
 		BaseDN:  baseDN,
 		Oneshot: oneshot,
 	}
+	searchesMu.Lock()
 	searches[id] = spec
+	searchesMu.Unlock()
 	// Initialize the structured results store for this search id.
+	searchResultsMu.Lock()
 	searchResults[id] = make(map[string]LDAPResult)
+	searchResultsMu.Unlock()
 	// Pass the oneshot flag to the search routine.
 	go ldapSearchAndSync(id, filter, baseDN, refresh, oneshot, stopChan)
 	return c.String(http.StatusOK, "Search created")
@@ -671,7 +711,9 @@ func createSearchHandler(c echo.Context) error {
 func getSearchHandler(c echo.Context) error {
 	id := c.QueryParam("id")
 	if id != "" {
+		searchesMu.RLock()
 		spec, exists := searches[id]
+		searchesMu.RUnlock()
 		if !exists {
 			return c.String(http.StatusNotFound, "Search with given id not found")
 		}
@@ -687,6 +729,7 @@ func getSearchHandler(c echo.Context) error {
 
 	// No id provided; return all searches.
 	var results []SearchInfo
+	searchesMu.RLock()
 	for k, spec := range searches {
 		results = append(results, SearchInfo{
 			ID:      k,
@@ -696,6 +739,7 @@ func getSearchHandler(c echo.Context) error {
 			Oneshot: spec.Oneshot,
 		})
 	}
+	searchesMu.RUnlock()
 	return c.JSON(http.StatusOK, results)
 }
 
@@ -724,7 +768,9 @@ func updateSearchHandler(c echo.Context) error {
 	if id == "" || filter == "" || refreshStr == "" {
 		return c.String(http.StatusBadRequest, "Missing required parameters (id, filter, refresh)")
 	}
+	searchesMu.RLock()
 	spec, exists := searches[id]
+	searchesMu.RUnlock()
 	if !exists {
 		return c.String(http.StatusBadRequest, "Search with this id does not exist")
 	}
@@ -769,16 +815,22 @@ func updateSearchHandler(c echo.Context) error {
 // @Router /search/{id} [delete]
 func deleteSearchHandler(c echo.Context) error {
 	id := c.Param("id")
+	searchesMu.RLock()
 	spec, exists := searches[id]
+	searchesMu.RUnlock()
 	if !exists {
 		return c.String(http.StatusNotFound, "Search not found")
 	}
 	// Cancel the running search.
 	close(spec.Stop)
 	// Remove from the map.
+	searchesMu.Lock()
 	delete(searches, id)
+	searchesMu.Unlock()
 	// Remove the results too
+	searchResultsMu.Lock()
 	delete(searchResults, id)
+	searchResultsMu.Unlock()
 	return c.String(http.StatusOK, "Search deleted")
 }
 
@@ -798,8 +850,10 @@ func deleteSearchHandler(c echo.Context) error {
 // @Router /results/{id} [get]
 func getResultsHandler(c echo.Context) error {
 	id := c.Param("id")
+	searchResultsMu.RLock()
 	results, exists := searchResults[id]
 	if !exists {
+		searchResultsMu.RUnlock()
 		return c.String(http.StatusNotFound, "Search results not found for id: "+id)
 	}
 
@@ -809,6 +863,7 @@ func getResultsHandler(c echo.Context) error {
 		for _, res := range results {
 			entries = append(entries, ResultEntryFull(res))
 		}
+		searchResultsMu.RUnlock()
 		return c.JSON(http.StatusOK, entries)
 	}
 
@@ -818,6 +873,7 @@ func getResultsHandler(c echo.Context) error {
 			DN: res.DN,
 		})
 	}
+	searchResultsMu.RUnlock()
 	return c.JSON(http.StatusOK, entries)
 }
 

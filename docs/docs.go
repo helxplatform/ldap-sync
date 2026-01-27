@@ -440,7 +440,10 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "transformed": {
-                    "$ref": "#/definitions/main.TransformedEntry"
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/main.TransformedEntry"
+                    }
                 }
             }
         },

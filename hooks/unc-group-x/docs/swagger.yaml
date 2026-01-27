@@ -36,7 +36,11 @@ definitions:
         type: array
       reset:
         type: boolean
-      transformed: {}
+      transformed:
+        items:
+          additionalProperties: true
+          type: object
+        type: array
     type: object
 info:
   contact: {}

@@ -104,7 +104,13 @@ const docTemplate = `{
                 "reset": {
                     "type": "boolean"
                 },
-                "transformed": {}
+                "transformed": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                }
             }
         }
     }

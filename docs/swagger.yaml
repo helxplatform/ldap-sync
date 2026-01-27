@@ -26,7 +26,9 @@ definitions:
       reset:
         type: boolean
       transformed:
-        $ref: '#/definitions/main.TransformedEntry'
+        items:
+          $ref: '#/definitions/main.TransformedEntry'
+        type: array
     type: object
   main.LogLevelRequest:
     properties:

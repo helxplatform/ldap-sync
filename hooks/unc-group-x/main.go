@@ -38,7 +38,7 @@ type DerivedSearch struct {
 
 // HookResponse defines the response structure returned by the /hook endpoint.
 type HookResponse struct {
-	Transformed  interface{}       `json:"transformed"`
+	Transformed  []map[string]interface{} `json:"transformed"`
 	Derived      []DerivedSearch   `json:"derived"`
 	Dependencies []string          `json:"dependencies"`
 	Bindings     map[string]string `json:"bindings"`
@@ -187,7 +187,7 @@ func processORDRDGroup(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed:  transformed,
+		Transformed:  []map[string]interface{}{transformed},
 		Derived:      derived,
 		Dependencies: dependencies,
 		Bindings:     map[string]string{},
@@ -258,7 +258,7 @@ func processUNCUser(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed:  transformed,
+		Transformed:  []map[string]interface{}{transformed},
 		Derived:      derived,
 		Dependencies: []string{},
 		Bindings:     bindings,
@@ -307,7 +307,7 @@ func processPosixGroup(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed:  transformed,
+		Transformed:  []map[string]interface{}{transformed},
 		Derived:      []DerivedSearch{},
 		Dependencies: []string{},
 		Bindings:     map[string]string{},
