@@ -19,6 +19,9 @@ var (
 
 	// baseGid is obtained from a flag and used when processing UNC Users.
 	baseGid string
+
+	// baseGroup is obtained from a flag and used for the shared posixGroup.
+	baseGroup string
 )
 
 // HookRequest represents the input payload for the /hook endpoint.
@@ -236,7 +239,10 @@ func processUNCUser(req HookRequest) HookResponse {
 		"content": newContent,
 	}
 
+	transformedEntries := []map[string]interface{}{transformed}
+
 	uidNumberStr, _ := req.Content["uidNumber"].(string)
+	uidStr, _ := req.Content["uid"].(string)
 	derived := []DerivedSearch{}
 	if uidNumberStr != "" {
 		derived = []DerivedSearch{
@@ -250,6 +256,19 @@ func processUNCUser(req HookRequest) HookResponse {
 		}
 	}
 
+	if baseGroup != "" && uidStr != "" {
+		baseGroupEntry := map[string]interface{}{
+			"dn": fmt.Sprintf("cn=%s,ou=groups,dc=example,dc=org", baseGroup),
+			"content": map[string]interface{}{
+				"cn":          baseGroup,
+				"gidNumber":   baseGid,
+				"memberUid":   []interface{}{uidStr},
+				"objectClass": []string{"top", "posixGroup"},
+			},
+		}
+		transformedEntries = append(transformedEntries, baseGroupEntry)
+	}
+
 	// Update the pidUidMap based on the user's pid.
 	bindings := map[string]string{}
 	if pid, ok := req.Content["pid"].(string); ok && pid != "" {
@@ -258,7 +277,7 @@ func processUNCUser(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed:  []map[string]interface{}{transformed},
+		Transformed:  transformedEntries,
 		Derived:      derived,
 		Dependencies: []string{},
 		Bindings:     bindings,
@@ -353,6 +372,7 @@ func copyMap(orig map[string]interface{}) map[string]interface{} {
 func main() {
 	// Accept the baseGid flag. Default value is "200" (adjust as needed).
 	flag.StringVar(&baseGid, "baseGid", "200", "Base gidNumber to use for UNC Users")
+	flag.StringVar(&baseGroup, "baseGroup", "users", "Base posixGroup CN for all UNC Users")
 	flag.Parse()
 
 	e := echo.New()

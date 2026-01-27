@@ -24,6 +24,8 @@ and outputs a JSON response containing:
   - The DN is built using the uid: "uid={{ uid }},ou=users,dc=example,dc=org".
   - The content is transformed to include key attributes and uses the
     global baseGid for "gidNumber".
+  - A shared posixGroup is emitted using baseGroup with memberUid set
+    to the user's uid.
   - A derived search is created based on uidNumber.
   - Bindings include "pidUidMap.<pid>" set to the user's uid.
 
@@ -67,7 +69,7 @@ and outputs a JSON response containing:
 4. **Running Locally:**
    - Execute the binary:
      ```
-     ./unc-group-x -baseGid=200
+     ./unc-group-x -baseGid=200 -baseGroup=users
      ```
    - Or run the Docker container:
      ```

@@ -108,6 +108,10 @@ var searchResults = make(map[string]map[string]LDAPResult)
 var searchesMu sync.RWMutex
 var searchResultsMu sync.RWMutex
 var dependencyTracker = newDependencyState()
+var mergeAttributes = map[string]struct{}{
+	"memberuid": {},
+}
+var dnLocks sync.Map
 
 type pendingEntry struct {
 	entry *TransformedEntry
@@ -133,6 +137,112 @@ func normalizeDN(dn string) string {
 	return strings.ToLower(strings.TrimSpace(dn))
 }
 
+func getDNLock(dn string) *sync.Mutex {
+	key := normalizeDN(dn)
+	if key == "" {
+		key = dn
+	}
+	lock, _ := dnLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func isMergeAttr(attr string) bool {
+	_, ok := mergeAttributes[strings.ToLower(attr)]
+	return ok
+}
+
+func isSliceValue(val interface{}) bool {
+	switch val.(type) {
+	case []interface{}, []string:
+		return true
+	default:
+		return false
+	}
+}
+
+func toStringSlice(val interface{}) []string {
+	switch v := val.(type) {
+	case []interface{}:
+		vals := make([]string, 0, len(v))
+		for _, x := range v {
+			vals = append(vals, fmt.Sprintf("%v", x))
+		}
+		return vals
+	case []string:
+		return append([]string{}, v...)
+	case nil:
+		return nil
+	default:
+		return []string{fmt.Sprintf("%v", v)}
+	}
+}
+
+func mergeValue(existing, incoming interface{}) interface{} {
+	if isSliceValue(existing) || isSliceValue(incoming) {
+		merged := mergeUnique(toStringSlice(existing), toStringSlice(incoming))
+		out := make([]interface{}, len(merged))
+		for i, v := range merged {
+			out[i] = v
+		}
+		return out
+	}
+	return incoming
+}
+
+func mergeEntryContent(existing, incoming map[string]interface{}) map[string]interface{} {
+	if existing == nil {
+		return incoming
+	}
+	if incoming == nil {
+		return existing
+	}
+	merged := make(map[string]interface{}, len(existing)+len(incoming))
+	for k, v := range existing {
+		merged[k] = v
+	}
+	for k, v := range incoming {
+		if cur, ok := merged[k]; ok {
+			merged[k] = mergeValue(cur, v)
+			continue
+		}
+		merged[k] = v
+	}
+	return merged
+}
+
+func getEntryAttributeValues(entry *ldap.Entry, attr string) []string {
+	attrLower := strings.ToLower(attr)
+	for _, a := range entry.Attributes {
+		if strings.ToLower(a.Name) == attrLower {
+			return append([]string{}, a.Values...)
+		}
+	}
+	return nil
+}
+
+func mergeUnique(existing, incoming []string) []string {
+	if len(existing) == 0 {
+		return append([]string{}, incoming...)
+	}
+	seen := make(map[string]struct{}, len(existing)+len(incoming))
+	merged := make([]string, 0, len(existing)+len(incoming))
+	for _, v := range existing {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+	for _, v := range incoming {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		merged = append(merged, v)
+	}
+	return merged
+}
+
 func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 	parentKey := normalizeDN(entry.DN)
 	if parentKey == "" {
@@ -151,6 +261,12 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 
 	d.mu.Lock()
 	if existing, ok := d.pending[parentKey]; ok {
+		if existing.entry != nil {
+			entry.Content = mergeEntryContent(existing.entry.Content, entry.Content)
+		}
+		for depKey := range existing.deps {
+			depSet[depKey] = struct{}{}
+		}
 		for depKey := range existing.deps {
 			parents := d.reverse[depKey]
 			if parents != nil {
@@ -327,6 +443,10 @@ func performLDAPSearch(l *ldap.Conn, baseDN, filter string) (*ldap.SearchResult,
 }
 
 func storeDestinationLDAP(entry *TransformedEntry) error {
+	lock := getDNLock(entry.DN)
+	lock.Lock()
+	defer lock.Unlock()
+
 	// Connect to destination LDAP.
 	l, err := ldap.DialURL(config.Target.URL)
 	if err != nil {
@@ -340,6 +460,12 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 	}
 
 	// Check if the entry exists.
+	searchAttrs := []string{"dn"}
+	if len(mergeAttributes) > 0 {
+		for attr := range mergeAttributes {
+			searchAttrs = append(searchAttrs, attr)
+		}
+	}
 	searchRequest := ldap.NewSearchRequest(
 		entry.DN,
 		ldap.ScopeBaseObject,
@@ -348,7 +474,7 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 		0,
 		false,
 		"(objectClass=*)",
-		[]string{"dn"},
+		searchAttrs,
 		nil,
 	)
 	sr, err := l.Search(searchRequest)
@@ -364,14 +490,19 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 
 	// Prepare attributes conversion: each attribute becomes a slice of strings.
 	attributes := make(map[string][]string)
+	aggregateAttrs := make(map[string]struct{})
 	for attr, value := range entry.Content {
 		switch v := value.(type) {
 		case []interface{}:
+			aggregateAttrs[attr] = struct{}{}
 			var vals []string
 			for _, x := range v {
 				vals = append(vals, fmt.Sprintf("%v", x))
 			}
 			attributes[attr] = vals
+		case []string:
+			aggregateAttrs[attr] = struct{}{}
+			attributes[attr] = append([]string{}, v...)
 		default:
 			attributes[attr] = []string{fmt.Sprintf("%v", v)}
 		}
@@ -392,6 +523,22 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 		}
 		logger.Info("Added entry to destination LDAP", "DN", entry.DN)
 	} else {
+		entryData := sr.Entries[0]
+		for attr, values := range attributes {
+			if !isMergeAttr(attr) {
+				if _, ok := aggregateAttrs[attr]; !ok {
+					continue
+				}
+			}
+			if len(values) == 0 {
+				continue
+			}
+			existing := getEntryAttributeValues(entryData, attr)
+			if len(existing) == 0 {
+				continue
+			}
+			attributes[attr] = mergeUnique(existing, values)
+		}
 		// If the entry exists, update it.
 		modReq := ldap.NewModifyRequest(entry.DN, nil)
 		for attr, values := range attributes {

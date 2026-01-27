@@ -47,7 +47,11 @@ The hook service must process the payload as follows:
    - **"transformed"**: This is the result of performing the transformation
      logic on the contents. It must be an array of objects, with a single
      item when a target representation exists. This can be `null` if there
-     is no target representation for the input entry.
+     is no target representation for the input entry. Multiple objects in
+     "transformed" may share the same DN across hook calls (for example,
+     the shared baseGroup posixGroup); the main process must merge such
+     records by DN rather than overwrite them. Merge order depends on
+     result arrival order and is undefined.
 
    - **"derived"**: An array of additional search specifications. Each
      element in "derived" must be a JSON object that describes a search
@@ -179,6 +183,12 @@ and return a binding entry for `pidUidMap.<pid>` with the user's uid.
 Maintain a global variable baseGid that is determined from a flag from the
 application.  Assign the baseGid to all gidNumber
 
+Maintain a global variable baseGroup that is determined from a flag from
+the application. Example2 should also emit a shared posixGroup record with
+DN "cn={{ baseGroup }},ou=groups,dc=example,dc=org" and a memberUid array
+containing the user's uid. The main process must merge memberUid values
+when multiple records share the same DN across hook calls.
+
 #### Example2 Input
 
     {
@@ -276,6 +286,19 @@ application.  Assign the baseGid to all gidNumber
           "uid": "kfecho",
           "uidNumber": "6651"
         }
+      }, {
+        "dn": "cn={{ baseGroup }},ou=groups,dc=example,dc=org",
+        "content": {
+          "cn": "{{ baseGroup }}",
+          "gidNumber": "{{ baseGid }}",
+          "memberUid": [
+            "kfecho"
+          ],
+          "objectClass": [
+            "top",
+            "posixGroup"
+          ]
+        }
       }],
       "dependencies": [],
       "derived": [{
@@ -306,7 +329,7 @@ application.  Assign the baseGid to all gidNumber
         "posixGroup",
         "UNCGroup"
       ],
-      "memberuid": [
+      "memberUid": [
         234,
         4350,
         9950
@@ -327,7 +350,7 @@ application.  Assign the baseGid to all gidNumber
           "posixGroup"
         ]
       },
-      "memberuid": [
+      "memberUid": [
         234,
         4350,
         9950
