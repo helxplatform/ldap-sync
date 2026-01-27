@@ -159,6 +159,24 @@ Each hook has its own Makefile with `docs`, `build`, and `push` targets. Build h
 - Default log level is "info"; valid levels are debug, info, warn, error
 - The service expects hooks to be HTTP endpoints that accept POST requests
 
+### Hook Retry Configuration
+
+Hook requests use exponential backoff retry logic to handle startup delays (e.g., when hook sidecars are still starting):
+
+```yaml
+hook_retry:
+  max_retries: 10           # Maximum retry attempts (default: 10)
+  initial_delay_ms: 100     # Initial delay in ms (default: 100)
+  max_delay_ms: 30000       # Maximum delay cap in ms (default: 30000)
+```
+
+Implementation details:
+- Uses exponential backoff with 2x multiplier
+- Adds ±10% jitter to prevent thundering herd
+- Logs warning on each retry attempt
+- Returns error after max retries exceeded
+- Configurable via config file with sensible defaults
+
 ## Key Implementation Details
 
 **Search Results Storage**: Each search maintains a map of DN to `LDAPResult` in `searchResults`. This allows the service to detect when entries are new, updated, or unchanged.

@@ -16,6 +16,10 @@ data:
     {{- else }}
     hooks: []
     {{- end }}
+    hook_retry:
+      max_retries: {{ .Values.config.hookRetry.maxRetries | default 10 }}
+      initial_delay_ms: {{ .Values.config.hookRetry.initialDelayMs | default 100 }}
+      max_delay_ms: {{ .Values.config.hookRetry.maxDelayMs | default 30000 }}
     source:
       url: {{ .Values.config.source.url | quote }}
       bind_dn: {{ .Values.config.source.bindDN | quote }}

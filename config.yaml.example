@@ -20,6 +20,13 @@ target:
 hooks:
   - "http://hook-service:5001/hook"
 
+# Hook retry configuration with exponential backoff
+# Used when hooks are not ready yet (e.g., during pod startup)
+hook_retry:
+  max_retries: 10           # Maximum number of retry attempts
+  initial_delay_ms: 100     # Initial delay in milliseconds
+  max_delay_ms: 30000       # Maximum delay cap in milliseconds
+
 # Database configuration for persisting searches
 # When enabled, searches created via API are saved to PostgreSQL
 # and automatically restored on startup

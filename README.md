@@ -186,7 +186,27 @@ transformations:
 hooks:
   - "http://hook-service-1:5001/hook"
   - "http://hook-service-2:5002/hook"
+
+# Hook retry configuration with exponential backoff
+hook_retry:
+  max_retries: 10           # Maximum retry attempts (default: 10)
+  initial_delay_ms: 100     # Initial delay in ms (default: 100)
+  max_delay_ms: 30000       # Maximum delay cap in ms (default: 30000)
 ```
+
+**Hook Retry Behavior:**
+
+Hooks are called with automatic retry and exponential backoff to handle
+startup delays (e.g., when hook sidecars are still initializing):
+
+- Retries up to `max_retries` times (default: 10)
+- Starts with `initial_delay_ms` delay (default: 100ms)
+- Doubles the delay on each retry (exponential backoff)
+- Caps delay at `max_delay_ms` (default: 30 seconds)
+- Adds ±10% jitter to prevent thundering herd
+
+This ensures hooks have time to start before the main application
+begins processing entries.
 
 ### Database Persistence
 

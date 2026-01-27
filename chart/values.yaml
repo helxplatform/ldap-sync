@@ -80,6 +80,10 @@ affinity: {}
 loglevel: "info"
 config:
   hooks: []
+  hookRetry:
+    maxRetries: 10
+    initialDelayMs: 100
+    maxDelayMs: 30000
   source:
     url: ""
     bindDN: "cn=admin,dc=example,dc=org"

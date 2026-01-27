@@ -45,12 +45,20 @@ type DatabaseConfig struct {
 	SSLMode      string `yaml:"sslmode"`
 }
 
+// HookRetryConfig holds retry configuration for hook requests.
+type HookRetryConfig struct {
+	MaxRetries    int `yaml:"max_retries"`
+	InitialDelayMs int `yaml:"initial_delay_ms"`
+	MaxDelayMs    int `yaml:"max_delay_ms"`
+}
+
 // Config holds the configuration for both source and target LDAP servers.
 type Config struct {
-	Source   LDAPConfig     `yaml:"source"`
-	Target   LDAPConfig     `yaml:"target"`
-	Hooks    []string       `yaml:"hooks"`
-	Database DatabaseConfig `yaml:"database"`
+	Source    LDAPConfig      `yaml:"source"`
+	Target    LDAPConfig      `yaml:"target"`
+	Hooks     []string        `yaml:"hooks"`
+	Database  DatabaseConfig  `yaml:"database"`
+	HookRetry HookRetryConfig `yaml:"hook_retry"`
 }
 
 // SearchSpec represents a running search instance.
@@ -826,6 +834,59 @@ func decodeHookResponses(body []byte) ([]HookResponse, error) {
 	return nil, fmt.Errorf("invalid hook response: expected object or array")
 }
 
+// postToHookWithRetry posts to a hook URL with exponential backoff retry logic.
+func postToHookWithRetry(hookURL string, payload []byte) (*http.Response, error) {
+	const backoffFactor = 2.0
+
+	// Get retry configuration with defaults
+	maxRetries := config.HookRetry.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 10
+	}
+	initialDelayMs := config.HookRetry.InitialDelayMs
+	if initialDelayMs == 0 {
+		initialDelayMs = 100
+	}
+	maxDelayMs := config.HookRetry.MaxDelayMs
+	if maxDelayMs == 0 {
+		maxDelayMs = 30000
+	}
+
+	initialDelay := time.Duration(initialDelayMs) * time.Millisecond
+	maxDelay := time.Duration(maxDelayMs) * time.Millisecond
+
+	var lastErr error
+	delay := initialDelay
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Add jitter to prevent thundering herd (±10%)
+			jitter := time.Duration(float64(delay) * 0.1)
+			sleepTime := delay + time.Duration(float64(jitter)*(2.0*float64(time.Now().UnixNano()%1000)/1000.0-1.0))
+			logger.Debug("Retrying hook request", "URL", hookURL, "Attempt", attempt+1, "Delay", sleepTime)
+			time.Sleep(sleepTime)
+
+			// Exponential backoff with cap
+			delay = time.Duration(float64(delay) * backoffFactor)
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+
+		resp, err := http.Post(hookURL, "application/json", bytes.NewBuffer(payload))
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+		if attempt < maxRetries {
+			logger.Warn("Hook request failed, will retry", "URL", hookURL, "Attempt", attempt+1, "Err", err)
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d attempts: %w", maxRetries+1, lastErr)
+}
+
 // sendHooks posts the LDAP result to each URL specified in config.Hooks.
 func sendHooks(result LDAPResult) {
 	payload, err := json.Marshal(result)
@@ -836,9 +897,9 @@ func sendHooks(result LDAPResult) {
 	for _, url := range config.Hooks {
 		// Launch each hook call concurrently.
 		go func(hookURL string) {
-			resp, err := http.Post(hookURL, "application/json", bytes.NewBuffer(payload))
+			resp, err := postToHookWithRetry(hookURL, payload)
 			if err != nil {
-				logger.Error("Error posting to hook", "URL", hookURL, "Err", err)
+				logger.Error("Error posting to hook after retries", "URL", hookURL, "Err", err)
 				return
 			}
 			defer resp.Body.Close()
