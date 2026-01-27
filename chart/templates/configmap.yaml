@@ -16,6 +16,10 @@ data:
     {{- else }}
     hooks: []
     {{- end }}
+    hook_retry:
+      max_retries: {{ .Values.config.hookRetry.maxRetries | default 10 }}
+      initial_delay_ms: {{ .Values.config.hookRetry.initialDelayMs | default 100 }}
+      max_delay_ms: {{ .Values.config.hookRetry.maxDelayMs | default 30000 }}
     source:
       url: {{ .Values.config.source.url | quote }}
       bind_dn: {{ .Values.config.source.bindDN | quote }}
@@ -26,3 +30,16 @@ data:
       bind_dn: {{ .Values.config.target.bindDN | quote }}
       bind_password: {{ .Values.config.target.bindPassword | quote }}
       base_dn: {{ .Values.config.target.baseDN | quote }}
+    {{- if .Values.postgres.enabled }}
+    database:
+      enabled: true
+      host: {{ .Release.Name }}-postgres
+      port: 5432
+      username: {{ .Values.postgres.auth.username | quote }}
+      database: {{ .Values.postgres.auth.database | quote }}
+      password_file: "/etc/ldap-sync/secrets/postgres-password"
+      sslmode: {{ .Values.postgres.sslmode | default "disable" | quote }}
+    {{- else }}
+    database:
+      enabled: false
+    {{- end }}
