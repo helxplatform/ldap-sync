@@ -27,6 +27,30 @@ spec:
       serviceAccountName: {{ include "ldap-sync.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: init-db-schema
+          image: postgres:15
+          command: ["/bin/bash", "/db/init-schema.sh"]
+          env:
+            - name: PGHOST
+              value: {{ .Release.Name }}-postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.auth.database | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgres
+                  key: postgres-password
+          volumeMounts:
+            - name: db-scripts
+              mountPath: /db
+              readOnly: true
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           args:
@@ -75,10 +99,14 @@ spec:
         {{- if .Values.postgres.enabled }}
         - name: postgres-secret
           secret:
-            secretName: {{ include "ldap-sync.fullname" . }}-postgres-credentials
+            secretName: {{ .Release.Name }}-postgres
             items:
-              - key: password
+              - key: postgres-password
                 path: postgres-password
+        - name: db-scripts
+          configMap:
+            name: {{ include "ldap-sync.fullname" . }}-db-scripts
+            defaultMode: 0755
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

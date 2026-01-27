@@ -129,6 +129,15 @@ member users.
      --namespace ldap-sync --create-namespace
    ```
 
+   **Note**: If using a custom release name, you must set the postgres
+   secret:
+   ```bash
+   helm upgrade --install my-release ./chart \
+     --set postgres.auth.existingSecret=my-release-postgres \
+     --set config.source.url="ldap://source:389" \
+     [other settings...]
+   ```
+
 ## Building
 
 ### Build Binary
@@ -194,26 +203,121 @@ database:
   sslmode: "disable"                # SSL mode (disable/require)
 ```
 
-**Benefits of Persistence:**
-- Searches survive pod restarts
-- Automatic restoration on startup
-- Survives helm upgrades and reinstalls
-- PostgreSQL password auto-generated and preserved
+#### How It Works
 
-**Secret Management:**
+The Helm chart deploys PostgreSQL using the CloudPirates postgres chart
+and manages search persistence through:
 
-The Helm chart uses three mechanisms to preserve the PostgreSQL password:
+1. **PostgreSQL Database**: Deployed as part of the Helm chart
+2. **Init Container**: Creates schema before main application starts
+3. **Automatic Persistence**: All API-created searches saved to database
+4. **Automatic Restoration**: Searches restored and resumed on startup
+
+#### Init Container
+
+An init container runs before the main ldap-sync container:
+
+- Uses `postgres:15` image (includes psql and pg_isready)
+- Waits up to 60 seconds for PostgreSQL to be ready
+- Executes `db/schema.sql` to create tables and indexes
+- Fails pod startup if PostgreSQL unavailable or schema creation fails
+
+For manual deployments:
+```bash
+export PGHOST=postgres-host PGPORT=5432 PGUSER=ldapsync \
+  PGDATABASE=ldapsync PGPASSWORD=password
+bash db/init-schema.sh
+```
+
+#### Secret Management
+
+The PostgreSQL password is auto-generated and preserved using:
 
 1. **Helm Lookup**: Detects existing secrets from previous installations
-2. **Keep Annotation**: Secret has `helm.sh/resource-policy: keep` to
-   prevent deletion during `helm uninstall`
+2. **Keep Annotation**: `helm.sh/resource-policy: keep` prevents
+   deletion during `helm uninstall`
 3. **Auto-Generation**: Random 32-character password on first install
 
-To completely remove everything including persisted data:
+The secret is named `<release-name>-postgres` with key
+`postgres-password`.
+
+**Important**: When using a custom release name (other than "ldap-sync"),
+you must set `postgres.auth.existingSecret`:
+
+```bash
+helm install my-release ./chart \
+  --set postgres.auth.existingSecret=my-release-postgres \
+  [other settings...]
+```
+
+**Behavior:**
+- **Helm Upgrade**: Existing password reused, no data loss
+- **Helm Uninstall + Reinstall**: Secret preserved, data persists if
+  using persistent volumes
+- **Complete Cleanup**: Manual deletion required
+
+To completely remove everything:
 ```bash
 helm uninstall ldap-sync
-kubectl delete secret ldap-sync-postgres-credentials -n ldap-sync
-kubectl delete pvc -l app.kubernetes.io/instance=ldap-sync -n ldap-sync
+kubectl delete secret ldap-sync-postgres -n <namespace>
+kubectl delete pvc -l app.kubernetes.io/instance=ldap-sync -n <namespace>
+```
+
+#### Using a Custom Password
+
+To use a custom password instead of auto-generated:
+
+1. Create secret before installing:
+   ```bash
+   kubectl create secret generic my-custom-secret \
+     --from-literal=password='my-secure-password' \
+     -n <namespace>
+   ```
+
+2. Set in values.yaml:
+   ```yaml
+   postgres:
+     auth:
+       existingSecret: "my-custom-secret"
+   ```
+
+#### Database Schema
+
+The `searches` table structure:
+
+```sql
+CREATE TABLE IF NOT EXISTS searches (
+    id TEXT PRIMARY KEY,
+    filter TEXT NOT NULL,
+    refresh INTEGER NOT NULL,
+    base_dn TEXT NOT NULL,
+    oneshot BOOLEAN NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_searches_created_at
+  ON searches(created_at);
+CREATE INDEX IF NOT EXISTS idx_searches_updated_at
+  ON searches(updated_at);
+```
+
+Schema is idempotent - init container can run multiple times safely.
+
+#### Helm Configuration
+
+```yaml
+postgres:
+  enabled: true
+  auth:
+    username: ldapsync
+    database: ldapsync
+    existingSecret: ""  # Optional: use custom secret
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
 ```
 
 ### Disable Persistence
@@ -377,6 +481,25 @@ curl -X PUT http://localhost:5500/loglevel \
 
 ## Troubleshooting
 
+### Init Container Fails
+
+If the init container fails (pod stuck in Init:0/1):
+
+1. Check PostgreSQL is running:
+   ```bash
+   kubectl get pods -l app.kubernetes.io/name=postgres
+   ```
+
+2. Check init container logs:
+   ```bash
+   kubectl logs <pod-name> -c init-db-schema
+   ```
+
+3. Common issues:
+   - PostgreSQL not ready within 60 seconds (check postgres pod status)
+   - Connection refused (verify postgres service exists)
+   - Authentication failed (check postgres-credentials secret)
+
 ### Searches Not Persisting
 
 1. Check PostgreSQL is enabled: `postgres.enabled: true`
@@ -388,7 +511,11 @@ curl -X PUT http://localhost:5500/loglevel \
    ```bash
    kubectl exec <pod> -- ls -la /etc/ldap-sync/secrets/
    ```
-4. Check application logs for database connection errors
+4. Verify init container completed:
+   ```bash
+   kubectl describe pod <pod-name> | grep -A 10 "Init Containers"
+   ```
+5. Check application logs for database connection errors
 
 ### Password Issues After Reinstall
 
@@ -399,8 +526,9 @@ If you encounter authentication errors after reinstalling:
    kubectl get secret <release>-postgres-credentials -n <namespace>
    ```
 
-2. If secret was deleted, either restore from backup or delete PVC and
-   start fresh
+2. If secret was deleted, you'll need to either:
+   - Restore from a database backup
+   - Delete the PVC and start fresh (data loss)
 
 ### Migration from Non-Persistent Setup
 
@@ -488,4 +616,4 @@ postgres:
 
 For issues and questions:
 - GitHub Issues: [Add your issues URL]
-- Documentation: See `chart/DATABASE-PERSISTENCE.md` and `CLAUDE.md`
+- Documentation: See `CLAUDE.md` and `db/README.md`

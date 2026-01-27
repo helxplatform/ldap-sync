@@ -202,23 +202,7 @@ func initDB(dbConfig DatabaseConfig) error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Create the searches table if it doesn't exist
-	createTableSQL := `
-	CREATE TABLE IF NOT EXISTS searches (
-		id TEXT PRIMARY KEY,
-		filter TEXT NOT NULL,
-		refresh INTEGER NOT NULL,
-		base_dn TEXT NOT NULL,
-		oneshot BOOLEAN NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-	);`
-
-	if _, err = db.Exec(createTableSQL); err != nil {
-		return fmt.Errorf("failed to create searches table: %w", err)
-	}
-
-	logger.Info("Database initialized successfully")
+	logger.Info("Database connection established successfully")
 	return nil
 }
 

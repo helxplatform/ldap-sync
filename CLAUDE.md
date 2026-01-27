@@ -41,12 +41,20 @@ database:
 ```
 
 When database persistence is enabled, the application will:
-- Automatically create the `searches` table on startup
+- Connect to the PostgreSQL database
 - Save all searches created via POST/PUT endpoints
 - Load and restore all saved searches on startup
 - Delete searches from the database when DELETE is called
 
-The password is read from a file (not environment variable) for better security. The Helm chart includes PostgreSQL persistence by default using the CloudPirates postgres chart. See `chart/DATABASE-PERSISTENCE.md` for details on secret management and backup/restore procedures.
+The password is read from a file (not environment variable) for better security. The Helm chart includes PostgreSQL persistence by default using the CloudPirates postgres chart.
+
+**Schema Management**: The database schema is created by an init container that runs before the main application starts. The init container:
+- Waits for PostgreSQL to be ready (up to 60 seconds)
+- Runs the schema creation script (`db/schema.sql`)
+- Creates the `searches` table with appropriate indexes
+- Ensures the application can connect immediately on startup
+
+For manual deployments, run `db/init-schema.sh` to create the schema. See the README.md Database Persistence section for details on secret management and backup/restore procedures.
 
 ## Running the Application
 

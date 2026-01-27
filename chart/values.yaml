@@ -103,10 +103,13 @@ postgres:
     username: ldapsync
     # Database name
     database: ldapsync
-    # Password will be auto-generated and preserved across helm upgrades
-    # To set a custom password, create a secret named <release>-postgres-credentials
-    # with key 'password' before installing the chart
-    existingSecret: ""
+    # Use the auto-generated secret with lookup function for password persistence
+    # IMPORTANT: Set this to "<your-release-name>-postgres" on install
+    # Example: --set postgres.auth.existingSecret=my-release-postgres
+    # For release name "ldap-sync", this default works
+    existingSecret: "ldap-sync-postgres"
+    secretKeys:
+      adminPasswordKey: postgres-password
   # SSL mode for PostgreSQL connection (disable, require, verify-ca, verify-full)
   sslmode: disable
   # Additional PostgreSQL configuration can be added here

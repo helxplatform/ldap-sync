@@ -29,7 +29,7 @@ data:
     {{- if .Values.postgres.enabled }}
     database:
       enabled: true
-      host: {{ include "ldap-sync.fullname" . }}-postgres
+      host: {{ .Release.Name }}-postgres
       port: 5432
       username: {{ .Values.postgres.auth.username | quote }}
       database: {{ .Values.postgres.auth.database | quote }}
