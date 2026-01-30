@@ -1,0 +1,42 @@
+# Example configuration file for ldap-sync
+# Copy to /etc/ldap-sync/config.yaml and customize for your environment
+
+# Source LDAP server configuration
+source:
+  url: "ldap://source-ldap.example.com:389"
+  bind_dn: "cn=admin,dc=example,dc=org"
+  bind_password: "source-password"
+  base_dn: "dc=example,dc=org"
+
+# Target LDAP server configuration
+target:
+  url: "ldap://target-ldap.example.com:389"
+  bind_dn: "cn=admin,dc=example,dc=org"
+  bind_password: "target-password"
+  base_dn: "dc=example,dc=org"
+
+# Hook URLs for transformation services
+# Hooks receive LDAP entries and return transformed entries
+hooks:
+  - "http://hook-service:5001/hook"
+
+# Hook retry configuration with exponential backoff
+# Used when hooks are not ready yet (e.g., during pod startup)
+hook_retry:
+  max_retries: 10           # Maximum number of retry attempts
+  initial_delay_ms: 100     # Initial delay in milliseconds
+  max_delay_ms: 30000       # Maximum delay cap in milliseconds
+
+# Database configuration for persisting searches
+# When enabled, searches created via API are saved to PostgreSQL
+# and automatically restored on startup
+database:
+  enabled: true
+  host: "postgres-host"
+  port: 5432
+  username: "ldapsync"
+  database: "ldapsync"
+  # Password is read from this file for security
+  password_file: "/etc/ldap-sync/secrets/postgres-password"
+  # SSL mode: disable, require, verify-ca, verify-full
+  sslmode: "disable"
