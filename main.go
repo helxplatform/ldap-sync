@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,9 +49,9 @@ type DatabaseConfig struct {
 
 // HookRetryConfig holds retry configuration for hook requests.
 type HookRetryConfig struct {
-	MaxRetries    int `yaml:"max_retries"`
+	MaxRetries     int `yaml:"max_retries"`
 	InitialDelayMs int `yaml:"initial_delay_ms"`
-	MaxDelayMs    int `yaml:"max_delay_ms"`
+	MaxDelayMs     int `yaml:"max_delay_ms"`
 }
 
 // Config holds the configuration for both source and target LDAP servers.
@@ -120,6 +122,7 @@ type HookResponse struct {
 	Derived      []DerivedSearchSpec `json:"derived"`
 	Reset        bool                `json:"reset"`
 	Dependencies []string            `json:"dependencies"`
+	Bindings     map[string]*string  `json:"bindings"`
 }
 
 var config Config
@@ -134,11 +137,16 @@ var mergeAttributes = map[string]struct{}{
 	"memberuid": {},
 }
 var dnLocks sync.Map
+var bindings = make(map[string]string)
+var nullBindings = make(map[string]struct{})
+var bindingsMu sync.RWMutex
+var bindingPattern = regexp.MustCompile(`\$[A-Za-z0-9_.]+`)
 var db *sql.DB
 
 type pendingEntry struct {
-	entry *TransformedEntry
-	deps  map[string]struct{}
+	entry   *TransformedEntry
+	deps    map[string]struct{}
+	rawDeps []string
 }
 
 type dependencyState struct {
@@ -158,6 +166,18 @@ func newDependencyState() *dependencyState {
 
 func normalizeDN(dn string) string {
 	return strings.ToLower(strings.TrimSpace(dn))
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func getDNLock(dn string) *sync.Mutex {
@@ -391,6 +411,205 @@ func mergeUnique(existing, incoming []string) []string {
 	return merged
 }
 
+func getBindingsSnapshot() (map[string]string, map[string]struct{}) {
+	bindingsMu.RLock()
+	defer bindingsMu.RUnlock()
+	snapshot := make(map[string]string, len(bindings))
+	for k, v := range bindings {
+		snapshot[k] = v
+	}
+	nullSnapshot := make(map[string]struct{}, len(nullBindings))
+	for k := range nullBindings {
+		nullSnapshot[k] = struct{}{}
+	}
+	return snapshot, nullSnapshot
+}
+
+func updateBindings(newBindings map[string]*string) {
+	if len(newBindings) == 0 {
+		return
+	}
+	bindingsMu.Lock()
+	prevCount := len(bindings)
+	prevNullCount := len(nullBindings)
+	nullCount := 0
+	for k, v := range newBindings {
+		if v == nil {
+			nullBindings[k] = struct{}{}
+			delete(bindings, k)
+			nullCount++
+			continue
+		}
+		bindings[k] = *v
+		delete(nullBindings, k)
+	}
+	total := len(bindings)
+	totalNull := len(nullBindings)
+	bindingsMu.Unlock()
+	logger.Debug(
+		"Bindings updated",
+		"NewCount", len(newBindings),
+		"NullCount", nullCount,
+		"TotalCount", total,
+		"TotalNullCount", totalNull,
+		"PrevCount", prevCount,
+		"PrevNullCount", prevNullCount,
+	)
+	dependencyTracker.reprocessPending()
+}
+
+func resolveString(input string, bindings map[string]string, nullBindings map[string]struct{}) (string, bool, bool) {
+	locs := bindingPattern.FindAllStringIndex(input, -1)
+	if len(locs) == 0 {
+		return input, false, false
+	}
+	var b strings.Builder
+	b.Grow(len(input))
+	missing := false
+	hasNull := false
+	last := 0
+	for _, loc := range locs {
+		b.WriteString(input[last:loc[0]])
+		key := input[loc[0]+1 : loc[1]]
+		if val, ok := bindings[key]; ok {
+			b.WriteString(val)
+		} else if _, ok := nullBindings[key]; ok {
+			hasNull = true
+		} else {
+			missing = true
+			b.WriteString(input[loc[0]:loc[1]])
+		}
+		last = loc[1]
+	}
+	b.WriteString(input[last:])
+	return b.String(), missing, hasNull
+}
+
+func resolveValue(val interface{}, bindings map[string]string, nullBindings map[string]struct{}) (interface{}, bool) {
+	switch v := val.(type) {
+	case string:
+		resolved, missing, _ := resolveString(v, bindings, nullBindings)
+		return resolved, missing
+	case []interface{}:
+		out := make([]interface{}, 0, len(v))
+		missing := false
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				resolved, miss, hasNull := resolveString(s, bindings, nullBindings)
+				missing = missing || miss
+				if hasNull {
+					continue
+				}
+				out = append(out, resolved)
+				continue
+			}
+			out = append(out, item)
+		}
+		return out, missing
+	case []string:
+		out := make([]string, 0, len(v))
+		missing := false
+		for _, item := range v {
+			resolved, miss, hasNull := resolveString(item, bindings, nullBindings)
+			missing = missing || miss
+			if hasNull {
+				continue
+			}
+			out = append(out, resolved)
+		}
+		return out, missing
+	default:
+		return val, false
+	}
+}
+
+func resolveEntryTemplates(entry *TransformedEntry, bindings map[string]string, nullBindings map[string]struct{}) (*TransformedEntry, bool) {
+	resolvedDN, missingDN, dnNull := resolveString(entry.DN, bindings, nullBindings)
+	resolvedContent := make(map[string]interface{}, len(entry.Content))
+	missingContent := false
+	for k, v := range entry.Content {
+		resolvedVal, missingVal := resolveValue(v, bindings, nullBindings)
+		missingContent = missingContent || missingVal
+		resolvedContent[k] = resolvedVal
+	}
+	if dnNull {
+		missingDN = true
+	}
+	return &TransformedEntry{
+		DN:      resolvedDN,
+		Content: resolvedContent,
+	}, missingDN || missingContent
+}
+
+func resolveDependencies(deps []string, bindings map[string]string, nullBindings map[string]struct{}) ([]string, bool) {
+	resolved := make([]string, 0, len(deps))
+	missing := false
+	for _, dep := range deps {
+		resolvedDep, miss, hasNull := resolveString(dep, bindings, nullBindings)
+		if hasNull {
+			continue
+		}
+		missing = missing || miss
+		resolved = append(resolved, resolvedDep)
+	}
+	return resolved, missing
+}
+
+func collectMissingBindingsFromString(input string, bindings map[string]string, nullBindings map[string]struct{}, missing map[string]struct{}) {
+	locs := bindingPattern.FindAllStringIndex(input, -1)
+	if len(locs) == 0 {
+		return
+	}
+	for _, loc := range locs {
+		key := input[loc[0]+1 : loc[1]]
+		if _, ok := bindings[key]; ok {
+			continue
+		}
+		if _, ok := nullBindings[key]; ok {
+			continue
+		}
+		missing[key] = struct{}{}
+	}
+}
+
+func collectMissingBindingsFromValue(val interface{}, bindings map[string]string, nullBindings map[string]struct{}, missing map[string]struct{}) {
+	switch v := val.(type) {
+	case string:
+		collectMissingBindingsFromString(v, bindings, nullBindings, missing)
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				collectMissingBindingsFromString(s, bindings, nullBindings, missing)
+			}
+		}
+	case []string:
+		for _, item := range v {
+			collectMissingBindingsFromString(item, bindings, nullBindings, missing)
+		}
+	}
+}
+
+func collectMissingBindings(entry *TransformedEntry, deps []string, bindings map[string]string, nullBindings map[string]struct{}) []string {
+	missing := make(map[string]struct{})
+	if entry != nil {
+		collectMissingBindingsFromString(entry.DN, bindings, nullBindings, missing)
+		for _, v := range entry.Content {
+			collectMissingBindingsFromValue(v, bindings, nullBindings, missing)
+		}
+	}
+	for _, dep := range deps {
+		collectMissingBindingsFromString(dep, bindings, nullBindings, missing)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(missing))
+	for key := range missing {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 	parentKey := normalizeDN(entry.DN)
 	if parentKey == "" {
@@ -398,22 +617,14 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 		return
 	}
 
-	depSet := make(map[string]struct{})
-	for _, dep := range deps {
-		depKey := normalizeDN(dep)
-		if depKey == "" || depKey == parentKey {
-			continue
-		}
-		depSet[depKey] = struct{}{}
-	}
-
+	rawDeps := append([]string{}, deps...)
 	d.mu.Lock()
 	if existing, ok := d.pending[parentKey]; ok {
 		if existing.entry != nil {
 			entry.Content = mergeEntryContent(existing.entry.Content, entry.Content)
 		}
-		for depKey := range existing.deps {
-			depSet[depKey] = struct{}{}
+		if len(existing.rawDeps) > 0 {
+			rawDeps = append(rawDeps, existing.rawDeps...)
 		}
 		for depKey := range existing.deps {
 			parents := d.reverse[depKey]
@@ -426,6 +637,32 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 		}
 		delete(d.pending, parentKey)
 	}
+	d.mu.Unlock()
+
+	bindingsSnapshot, nullSnapshot := getBindingsSnapshot()
+	resolvedEntry, entryMissing := resolveEntryTemplates(entry, bindingsSnapshot, nullSnapshot)
+	resolvedDeps, depsMissing := resolveDependencies(rawDeps, bindingsSnapshot, nullSnapshot)
+	logger.Debug(
+		"Resolved dependencies",
+		"DN", entry.DN,
+		"RawDeps", len(rawDeps),
+		"ResolvedDeps", len(resolvedDeps),
+		"EntryMissing", entryMissing,
+		"DepsMissing", depsMissing,
+		"BindingsCount", len(bindingsSnapshot),
+		"NullBindingsCount", len(nullSnapshot),
+	)
+
+	depSet := make(map[string]struct{})
+	for _, dep := range resolvedDeps {
+		depKey := normalizeDN(dep)
+		if depKey == "" || depKey == parentKey {
+			continue
+		}
+		depSet[depKey] = struct{}{}
+	}
+
+	d.mu.Lock()
 
 	missing := make(map[string]struct{})
 	for depKey := range depSet {
@@ -433,20 +670,30 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 			missing[depKey] = struct{}{}
 		}
 	}
+	missingList := sortedKeys(missing)
+	resolvedList := sortedKeys(depSet)
+	logger.Debug(
+		"Dependency state for entry",
+		"DN", entry.DN,
+		"ResolvedDependencies", resolvedList,
+		"MissingDependencies", missingList,
+		"MissingCount", len(missingList),
+	)
 
-	if len(missing) == 0 {
+	if len(missing) == 0 && !entryMissing && !depsMissing {
 		d.mu.Unlock()
-		if err := storeDestinationLDAP(entry); err != nil {
-			logger.Error("Error storing entry in destination LDAP", "DN", entry.DN, "Err", err)
+		if err := storeDestinationLDAP(resolvedEntry); err != nil {
+			logger.Error("Error storing entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
 			return
 		}
-		d.markSyncedAndRelease(parentKey)
+		d.markSyncedAndRelease(resolvedEntry.DN)
 		return
 	}
 
 	d.pending[parentKey] = &pendingEntry{
-		entry: entry,
-		deps:  missing,
+		entry:   entry,
+		deps:    missing,
+		rawDeps: rawDeps,
 	}
 	for depKey := range missing {
 		parents := d.reverse[depKey]
@@ -455,10 +702,69 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 			d.reverse[depKey] = parents
 		}
 		parents[parentKey] = struct{}{}
+		logger.Debug("Adding dependency", "DN", entry.DN, "Dependency", depKey)
+	}
+	logger.Debug(
+		"Pending entry stored",
+		"DN", entry.DN,
+		"MissingDependencies", missingList,
+		"MissingCount", len(missingList),
+	)
+	d.mu.Unlock()
+
+	if entryMissing || depsMissing {
+		missingKeys := collectMissingBindings(entry, rawDeps, bindingsSnapshot, nullSnapshot)
+		logger.Info(
+			"Deferred entry until bindings are resolved",
+			"DN", entry.DN,
+			"MissingDependencies", len(missing),
+			"MissingBindings", missingKeys,
+			"BindingsCount", len(bindingsSnapshot),
+			"NullBindingsCount", len(nullSnapshot),
+		)
+	} else {
+		logger.Info(
+			"Deferred entry until dependencies are synced",
+			"DN", entry.DN,
+			"MissingDependencies", len(missing),
+			"BindingsCount", len(bindingsSnapshot),
+			"NullBindingsCount", len(nullSnapshot),
+		)
+	}
+}
+
+func (d *dependencyState) reprocessPending() {
+	var pendingEntries []*pendingEntry
+
+	d.mu.Lock()
+	pendingCount := len(d.pending)
+	for parentKey, pending := range d.pending {
+		if pending != nil {
+			pendingEntries = append(pendingEntries, pending)
+			for depKey := range pending.deps {
+				parents := d.reverse[depKey]
+				if parents != nil {
+					delete(parents, parentKey)
+					if len(parents) == 0 {
+						delete(d.reverse, depKey)
+					}
+				}
+			}
+		}
+		delete(d.pending, parentKey)
 	}
 	d.mu.Unlock()
 
-	logger.Info("Deferred entry until dependencies are synced", "DN", entry.DN, "MissingDependencies", len(missing))
+	if pendingCount > 0 {
+		logger.Debug("Reprocessing pending entries", "Count", pendingCount)
+	}
+	for _, pending := range pendingEntries {
+		if pending.entry == nil {
+			continue
+		}
+		logger.Debug("Reprocessing pending entry", "DN", pending.entry.DN, "RawDeps", len(pending.rawDeps))
+		d.handleEntry(pending.entry, pending.rawDeps)
+	}
 }
 
 func (d *dependencyState) markSyncedAndRelease(dn string) {
@@ -467,7 +773,15 @@ func (d *dependencyState) markSyncedAndRelease(dn string) {
 		return
 	}
 
-	var ready []*TransformedEntry
+	var ready []*pendingEntry
+	type depReleaseLog struct {
+		parentDN       string
+		resolvedDepDN  string
+		remainingDeps  []string
+		remainingCount int
+	}
+	var releaseLogs []depReleaseLog
+	var parentDNs []string
 
 	d.mu.Lock()
 	if _, exists := d.synced[dnKey]; exists {
@@ -480,23 +794,72 @@ func (d *dependencyState) markSyncedAndRelease(dn string) {
 	delete(d.reverse, dnKey)
 	for parentKey := range parents {
 		pending, ok := d.pending[parentKey]
+		parentDN := parentKey
+		if ok && pending != nil && pending.entry != nil && pending.entry.DN != "" {
+			parentDN = pending.entry.DN
+		}
+		if parentDN != "" {
+			parentDNs = append(parentDNs, parentDN)
+		}
 		if !ok {
 			continue
 		}
 		delete(pending.deps, dnKey)
+		remaining := sortedKeys(pending.deps)
+		releaseLogs = append(releaseLogs, depReleaseLog{
+			parentDN:       parentDN,
+			resolvedDepDN:  dn,
+			remainingDeps:  remaining,
+			remainingCount: len(remaining),
+		})
 		if len(pending.deps) == 0 {
-			ready = append(ready, pending.entry)
+			ready = append(ready, pending)
 			delete(d.pending, parentKey)
 		}
 	}
 	d.mu.Unlock()
 
-	for _, entry := range ready {
-		if err := storeDestinationLDAP(entry); err != nil {
-			logger.Error("Error storing deferred entry in destination LDAP", "DN", entry.DN, "Err", err)
-			continue
+	if len(parentDNs) > 0 {
+		sort.Strings(parentDNs)
+		logger.Debug(
+			"Dependency synced",
+			"DN", dn,
+			"Parents", len(parentDNs),
+			"ParentDNs", parentDNs,
+			"ReadyToRelease", len(ready),
+		)
+	}
+	for _, logEntry := range releaseLogs {
+		logger.Debug(
+			"Dependency resolved for parent",
+			"ParentDN", logEntry.parentDN,
+			"ResolvedDependency", logEntry.resolvedDepDN,
+			"RemainingDependencies", logEntry.remainingCount,
+			"RemainingList", logEntry.remainingDeps,
+		)
+	}
+	if len(ready) > 0 {
+		bindingsSnapshot, nullSnapshot := getBindingsSnapshot()
+		for _, pending := range ready {
+			if pending == nil || pending.entry == nil {
+				continue
+			}
+			resolvedEntry, missing := resolveEntryTemplates(pending.entry, bindingsSnapshot, nullSnapshot)
+			if missing {
+				logger.Info(
+					"Deferred entry still missing bindings on release",
+					"DN", pending.entry.DN,
+				)
+				d.handleEntry(pending.entry, pending.rawDeps)
+				continue
+			}
+			if err := storeDestinationLDAP(resolvedEntry); err != nil {
+				logger.Error("Error storing deferred entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
+				continue
+			}
+			logger.Info("Storing deferred entry in destination LDAP", "DN", resolvedEntry.DN)
+			d.markSyncedAndRelease(resolvedEntry.DN)
 		}
-		d.markSyncedAndRelease(entry.DN)
 	}
 }
 
@@ -758,6 +1121,11 @@ func ldapSearchAndSync(id, filter, baseDN string, refresh int, oneshot bool, sto
 func processHookResponse(hookResp HookResponse) {
 	// Log the parsed hook response values.
 	logger.Debug("Processing Hook response", "Transformed", hookResp.Transformed, "Derived", hookResp.Derived, "Reset", hookResp.Reset)
+
+	if len(hookResp.Bindings) > 0 {
+		logger.Debug("Hook bindings received", "Count", len(hookResp.Bindings))
+		updateBindings(hookResp.Bindings)
+	}
 
 	// Process the transformed element (if present).
 	if len(hookResp.Transformed) > 0 {
