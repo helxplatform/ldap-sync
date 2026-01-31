@@ -163,7 +163,7 @@ process will wait until bindings are present to resolve the templates.
         "uid=$pidUidMap.730383111,ou=users,dc=example,dc=org"
       ],
       "derived": [{
-        "id": "ordrd-members",
+        "id": "{{ groupname }}-members",
         "filter": "(|(pid=713272486)(pid=709909262)(pid=730294000)(pid=700268159)(pid=730383111))",
         "refresh": 10,
         "baseDN": "ou=people,dc=unc,dc=edu",
@@ -369,7 +369,7 @@ when multiple records share the same DN across hook calls.
 
 The application name is unc-group-x
 The application listens to port 5001
-This is version 1.2.0
+This is version 2.3.2
 
 ## Output
 
