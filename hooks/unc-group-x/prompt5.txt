@@ -105,6 +105,9 @@ by the processing of UNC Users (see Example2).
 The special instructions only affect value of transformation and
 dependencies, but derived should be returned in all cases.
 
+The extracted groupname should be the segment after the final ":"
+in the CN (for example, "unc:app:renci:users" -> "users").
+
 Use `$pidUidMap.<pid>` template variables in the member list and in the
 dependencies list. Do not set reset; return reset as false. The main
 process will wait until bindings are present to resolve the templates.

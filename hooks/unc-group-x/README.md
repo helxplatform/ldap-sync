@@ -13,7 +13,8 @@ and outputs a JSON response containing:
 ## Conversion Process Summary
 
 - **ORDRD Group (Example1):**
-  - The groupname is extracted from the DN.
+  - The groupname is extracted from the CN and stripped to the segment
+    after the last ":" (for example, "unc:app:renci:users" -> "users").
   - The DN is updated to "cn={{ groupname }},ou=groups,dc=example,dc=org".
   - Member entries use DN templates such as
     "uid=$pidUidMap.<pid>,ou=users,dc=example,dc=org".

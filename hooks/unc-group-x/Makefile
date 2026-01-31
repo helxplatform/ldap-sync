@@ -1,5 +1,5 @@
 REPO ?= containers.renci.org/helxplatform/unc-group-x
-TAG ?= v2.2.1
+TAG ?= v2.3.1
 PLATFORM ?= linux/amd64
 
 .PHONY: docs build push
