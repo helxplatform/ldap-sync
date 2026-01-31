@@ -424,6 +424,12 @@ const docTemplate = `{
         "main.HookResponse": {
             "type": "object",
             "properties": {
+                "bindings": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
                 "dependencies": {
                     "type": "array",
                     "items": {

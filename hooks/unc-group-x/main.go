@@ -42,10 +42,10 @@ type DerivedSearch struct {
 // HookResponse defines the response structure returned by the /hook endpoint.
 type HookResponse struct {
 	Transformed  []map[string]interface{} `json:"transformed"`
-	Derived      []DerivedSearch   `json:"derived"`
-	Dependencies []string          `json:"dependencies"`
-	Bindings     map[string]string `json:"bindings"`
-	Reset        bool              `json:"reset"`
+	Derived      []DerivedSearch          `json:"derived"`
+	Dependencies []string                 `json:"dependencies"`
+	Bindings     map[string]*string       `json:"bindings"`
+	Reset        bool                     `json:"reset"`
 }
 
 // @Summary Process LDAP hook payload
@@ -83,7 +83,7 @@ func hookHandler(c echo.Context) error {
 			Transformed:  nil,
 			Derived:      []DerivedSearch{},
 			Dependencies: []string{},
-			Bindings:     map[string]string{},
+			Bindings:     map[string]*string{},
 			Reset:        false,
 		}
 	}
@@ -111,7 +111,7 @@ func processORDRDGroup(req HookRequest) HookResponse {
 			Transformed:  nil,
 			Derived:      []DerivedSearch{},
 			Dependencies: []string{},
-			Bindings:     map[string]string{},
+			Bindings:     map[string]*string{},
 			Reset:        false,
 		}
 	}
@@ -125,7 +125,7 @@ func processORDRDGroup(req HookRequest) HookResponse {
 			Transformed:  nil,
 			Derived:      []DerivedSearch{},
 			Dependencies: []string{},
-			Bindings:     map[string]string{},
+			Bindings:     map[string]*string{},
 			Reset:        false,
 		}
 	}
@@ -137,7 +137,7 @@ func processORDRDGroup(req HookRequest) HookResponse {
 			Transformed:  nil,
 			Derived:      []DerivedSearch{},
 			Dependencies: []string{},
-			Bindings:     map[string]string{},
+			Bindings:     map[string]*string{},
 			Reset:        false,
 		}
 	}
@@ -193,7 +193,7 @@ func processORDRDGroup(req HookRequest) HookResponse {
 		Transformed:  []map[string]interface{}{transformed},
 		Derived:      derived,
 		Dependencies: dependencies,
-		Bindings:     map[string]string{},
+		Bindings:     map[string]*string{},
 		Reset:        false,
 	}
 }
@@ -207,13 +207,23 @@ func processORDRDGroup(req HookRequest) HookResponse {
 //   - Update the global pidUidMap using the user's pid and uid.
 func processUNCUser(req HookRequest) HookResponse {
 	uid, ok := req.Content["uid"].(string)
+	pid, _ := req.Content["pid"].(string)
 	if !ok || uid == "" {
-		log.Println("UNC User: uid not found or invalid")
+		if pid != "" {
+			log.Printf("UNC User: uid not found or invalid; binding marked null for pid %s", pid)
+			delete(pidUidMap, pid)
+		} else {
+			log.Println("UNC User: uid not found or invalid; pid missing")
+		}
+		bindings := map[string]*string{}
+		if pid != "" {
+			bindings[fmt.Sprintf("pidUidMap.%s", pid)] = nil
+		}
 		return HookResponse{
 			Transformed:  nil,
 			Derived:      []DerivedSearch{},
 			Dependencies: []string{},
-			Bindings:     map[string]string{},
+			Bindings:     bindings,
 			Reset:        false,
 		}
 	}
@@ -221,17 +231,17 @@ func processUNCUser(req HookRequest) HookResponse {
 
 	// Build the transformed content.
 	newContent := map[string]interface{}{
-		"cn":            req.Content["cn"],
-		"displayName":   req.Content["displayName"],
-		"gidNumber":     baseGid, // Use the global baseGid.
-		"givenName":     req.Content["givenName"],
-		"homeDirectory": fmt.Sprintf("/home/%s", uid),
-		"objectClass":   []string{"top", "inetOrgPerson", "posixAccount", "helxUser"},
-		"ou":            "users",
-		"sn":            req.Content["sn"],
+		"cn":                 req.Content["cn"],
+		"displayName":        req.Content["displayName"],
+		"gidNumber":          baseGid, // Use the global baseGid.
+		"givenName":          req.Content["givenName"],
+		"homeDirectory":      fmt.Sprintf("/home/%s", uid),
+		"objectClass":        []string{"top", "inetOrgPerson", "posixAccount", "helxUser"},
+		"ou":                 "users",
+		"sn":                 req.Content["sn"],
 		"supplementalGroups": []interface{}{"0"},
-		"uid":           uid,
-		"uidNumber":     req.Content["uidNumber"],
+		"uid":                uid,
+		"uidNumber":          req.Content["uidNumber"],
 	}
 
 	transformed := map[string]interface{}{
@@ -270,10 +280,10 @@ func processUNCUser(req HookRequest) HookResponse {
 	}
 
 	// Update the pidUidMap based on the user's pid.
-	bindings := map[string]string{}
-	if pid, ok := req.Content["pid"].(string); ok && pid != "" {
+	bindings := map[string]*string{}
+	if pid != "" {
 		pidUidMap[pid] = uid
-		bindings[fmt.Sprintf("pidUidMap.%s", pid)] = uid
+		bindings[fmt.Sprintf("pidUidMap.%s", pid)] = &uid
 	}
 
 	return HookResponse{
@@ -329,23 +339,27 @@ func processPosixGroup(req HookRequest) HookResponse {
 		Transformed:  []map[string]interface{}{transformed},
 		Derived:      []DerivedSearch{},
 		Dependencies: []string{},
-		Bindings:     map[string]string{},
+		Bindings:     map[string]*string{},
 		Reset:        false,
 	}
 }
 
-// extractGroupName extracts the groupname from a DN expected in the form:
-// "cn=unc:app:renci:{{ groupname }},ou=Groups,dc=unc,dc=edu"
+// extractGroupName extracts the groupname from the CN portion of a DN.
+// If the CN contains colon-delimited segments, it returns the segment
+// after the last ":" (e.g., "unc:app:renci:users" -> "users").
 func extractGroupName(dn string) string {
-	prefix := "cn=unc:app:renci:"
-	if strings.HasPrefix(dn, prefix) {
-		remain := dn[len(prefix):]
-		parts := strings.Split(remain, ",")
-		if len(parts) > 0 {
-			return parts[0]
-		}
+	cn := extractCN(dn)
+	if cn == "" {
+		return ""
 	}
-	return ""
+	lastIdx := strings.LastIndex(cn, ":")
+	if lastIdx >= 0 {
+		if lastIdx+1 >= len(cn) {
+			return ""
+		}
+		return cn[lastIdx+1:]
+	}
+	return cn
 }
 
 // extractCN extracts the common name (cn) from a DN.
