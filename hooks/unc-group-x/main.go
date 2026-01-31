@@ -166,9 +166,10 @@ func processORDRDGroup(req HookRequest) HookResponse {
 	// Build the derived search specification.
 	derived := []DerivedSearch{}
 	if len(filterParts) > 0 {
+		derivedID := fmt.Sprintf("%s-members", groupname)
 		derived = []DerivedSearch{
 			{
-				ID:      "ordrd-members",
+				ID:      derivedID,
 				Filter:  "(|" + strings.Join(filterParts, "") + ")",
 				Refresh: 10,
 				BaseDN:  "ou=people,dc=unc,dc=edu",

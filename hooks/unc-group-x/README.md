@@ -19,7 +19,8 @@ and outputs a JSON response containing:
   - Member entries use DN templates such as
     "uid=$pidUidMap.<pid>,ou=users,dc=example,dc=org".
   - Dependencies mirror the templated member DNs.
-  - Derived search is created with a filter combining all pid values.
+  - Derived search uses id "{{ groupname }}-members" and combines all
+    pid values in the filter.
 
 - **UNC User (Example2):**
   - The DN is built using the uid: "uid={{ uid }},ou=users,dc=example,dc=org".
