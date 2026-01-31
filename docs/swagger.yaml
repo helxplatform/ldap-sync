@@ -15,6 +15,10 @@ definitions:
     type: object
   main.HookResponse:
     properties:
+      bindings:
+        additionalProperties:
+          type: string
+        type: object
       dependencies:
         items:
           type: string
