@@ -1,4 +1,4 @@
-module main
+module ldap-sync
 
 go 1.23.2
 

@@ -1,4 +1,4 @@
-module main
+module ordrd-group-x
 
 go 1.23.2
 
