@@ -98,10 +98,9 @@ config:
 # PostgreSQL configuration
 postgres:
   enabled: true
-  primary:
-    persistence:
-      enabled: true
-      size: 8Gi
+  persistence:
+    enabled: true
+    size: 8Gi
   auth:
     # Username for the database
     username: ldapsync
@@ -116,5 +115,18 @@ postgres:
       adminPasswordKey: postgres-password
   # SSL mode for PostgreSQL connection (disable, require, verify-ca, verify-full)
   sslmode: disable
+  config:
+    # postgres 14+ stores passwords as scram-sha-256 by default.
+    # The cloudpirates chart's default pg_hba.conf uses md5 for remote connections,
+    # which cannot verify a scram-sha-256 hash — remote auth fails even though the
+    # readiness probe (127.0.0.1 = trust) passes. Override to scram-sha-256.
+    pgHbaConfig: |
+      local   all             all                                     trust
+      host    all             all             127.0.0.1/32            trust
+      host    all             all             ::1/128                 trust
+      local   replication     all                                     trust
+      host    replication     all             127.0.0.1/32            trust
+      host    replication     all             ::1/128                 trust
+      host    all             all             all                     scram-sha-256
   # Additional PostgreSQL configuration can be added here
   # For example, resource limits, custom configuration, etc.
