@@ -40,12 +40,16 @@ data:
     : "${PGUSER:?PGUSER must be set}"
     : "${PGDATABASE:?PGDATABASE must be set}"
 
-    # Wait for PostgreSQL to be ready (max 60 seconds)
-    RETRIES=60
-    until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -q || [ $RETRIES -eq 0 ]; do
+    # Wait for PostgreSQL to be ready (max 5 minutes)
+    # Use psql (not pg_isready) so we verify the user/database actually exist and
+    # authentication works — pg_isready only checks TCP connectivity, not auth.
+    # PGCONNECT_TIMEOUT=5 is critical: without it psql hangs indefinitely when the
+    # Service has no ready endpoints, preventing the retry loop from cycling.
+    RETRIES=120
+    until PGCONNECT_TIMEOUT=5 psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c '\q' >/dev/null 2>&1 || [ $RETRIES -eq 0 ]; do
       echo "Waiting for PostgreSQL at $PGHOST:$PGPORT... ($RETRIES retries left)"
       RETRIES=$((RETRIES - 1))
-      sleep 1
+      sleep 5
     done
 
     if [ $RETRIES -eq 0 ]; then
