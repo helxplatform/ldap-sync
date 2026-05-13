@@ -94,6 +94,16 @@ config:
     bindDN: "cn=admin,dc=example,dc=org"
     bindPassword: ""
     baseDN: "dc=example,dc=org"
+  plugins:
+    # Creates a PVC in the release namespace for every synced group
+    # entry. When enabled, the chart also installs a Role/RoleBinding
+    # granting the service account get/list/create on PVCs.
+    pvcGroup:
+      enabled: true
+      storageClass: ""
+      size: 10Gi
+      accessModes:
+        - ReadWriteMany
 
 # PostgreSQL configuration
 postgres:

@@ -60,3 +60,12 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+True when the pvc-group plugin is enabled in values. Used to gate the
+PVC RBAC role/rolebinding so clusters without the plugin don't get the
+extra permissions.
+*/}}
+{{- define "ldap-sync.pvcGroupEnabled" -}}
+{{- ((((.Values.config).plugins).pvcGroup).enabled) | ternary "true" "" -}}
+{{- end }}

@@ -43,3 +43,17 @@ data:
     database:
       enabled: false
     {{- end }}
+    plugins:
+      enabled:
+        {{- with .Values.config.plugins.pvcGroup }}
+        {{- if .enabled }}
+        - name: pvc-group
+          enabled: true
+          options:
+            namespace: {{ $.Release.Namespace | quote }}
+            storageClass: {{ .storageClass | quote }}
+            size: {{ .size | quote }}
+            accessModes:
+              {{- toYaml .accessModes | nindent 14 }}
+        {{- end }}
+        {{- end }}
