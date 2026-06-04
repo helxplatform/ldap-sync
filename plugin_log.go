@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"gopkg.in/yaml.v2"
@@ -42,9 +43,48 @@ func buildPlugin(cfg PluginConfig) (Plugin, error) {
 			return nil, err
 		}
 		return newPVCGroupPlugin(opts, clientGoPVCClient{c: kc})
+	case "postgres-user":
+		var opts postgresUserConfig
+		if err := decodeOptions(cfg.Options, &opts); err != nil {
+			return nil, fmt.Errorf("postgres-user: decode options: %w", err)
+		}
+		opts = opts.withDefaults()
+		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+			opts.Username, opts.Password, opts.Host, opts.Port, opts.Database, opts.SSLMode)
+		adminDB, err := sql.Open("postgres", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("postgres-user: open admin connection: %w", err)
+		}
+		kc, err := buildKubeClient(opts.Kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+		admin := sqlPGAdmin{db: stdSQLAdapter{db: adminDB}}
+		return newPostgresUserPlugin(opts, admin, clientGoSecretClient{c: kc})
 	default:
 		return nil, fmt.Errorf("unknown plugin %q", cfg.Name)
 	}
+}
+
+// stdSQLAdapter adapts *sql.DB to the sqlExecQuerier surface used by sqlPGAdmin.
+type stdSQLAdapter struct {
+	db *sql.DB
+}
+
+func (a stdSQLAdapter) ExecContext(ctx context.Context, query string, args ...interface{}) (sqlResult, error) {
+	return a.db.ExecContext(ctx, query, args...)
+}
+
+func (a stdSQLAdapter) QueryRowScanText(ctx context.Context, query string, args ...interface{}) (string, bool, error) {
+	var val string
+	err := a.db.QueryRowContext(ctx, query, args...).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return val, true, nil
 }
 
 // decodeOptions round-trips the generic options map through YAML so the
