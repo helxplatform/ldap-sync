@@ -119,22 +119,23 @@ config:
       database: ""
       sslmode: disable
       matchObjectClass: helxUser
-      namePrefix: "pg-creds-"
+      namePrefix: "pguser-"
       # Map each LDAP group short-name to a Postgres role and the privilege
       # statements that define it. Privileges are plain SQL run verbatim when
       # the role is first ensured. The "users" group is REQUIRED and acts as
       # the default role every user receives.
       groupRoles:
-        users:
-          role: viewer
-          privileges:
-            - "GRANT CONNECT ON DATABASE app TO viewer"
-            - "GRANT USAGE ON SCHEMA public TO viewer"
-            - "GRANT SELECT ON ALL TABLES IN SCHEMA public TO viewer"
-        admin:
-          role: db_admin
-          privileges:
-            - "GRANT ALL PRIVILEGES ON DATABASE app TO db_admin"
+        {}
+        # users:
+        #   role: viewer
+        #   privileges:
+        #     - "GRANT CONNECT ON DATABASE app TO viewer"
+        #     - "GRANT USAGE ON SCHEMA public TO viewer"
+        #     - "GRANT SELECT ON ALL TABLES IN SCHEMA public TO viewer"
+        # admin:
+        #   role: db_admin
+        #   privileges:
+        #     - "GRANT ALL PRIVILEGES ON DATABASE app TO db_admin"
 
 # PostgreSQL configuration
 postgres:

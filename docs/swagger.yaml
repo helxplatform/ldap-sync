@@ -1,6 +1,6 @@
 basePath: /
 definitions:
-  main.DerivedSearchSpec:
+  ldap-sync_hooks_ordrd-group-x.DerivedSearch:
     properties:
       baseDN:
         type: string
@@ -13,7 +13,51 @@ definitions:
       refresh:
         type: integer
     type: object
-  main.HookResponse:
+  ldap-sync_hooks_ordrd-group-x.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+  ldap-sync_hooks_ordrd-group-x.HookResponse:
+    properties:
+      derived:
+        items:
+          $ref: '#/definitions/ldap-sync_hooks_ordrd-group-x.DerivedSearch'
+        type: array
+      reset:
+        type: boolean
+      transformed:
+        description: must be an array so main.go can parse []TransformedEntry
+        items:
+          additionalProperties: true
+          type: object
+        type: array
+    type: object
+  ldap-sync_hooks_unc-group-x.DerivedSearch:
+    properties:
+      baseDN:
+        type: string
+      filter:
+        type: string
+      id:
+        type: string
+      oneshot:
+        type: boolean
+      refresh:
+        type: integer
+    type: object
+  ldap-sync_hooks_unc-group-x.HookRequest:
+    properties:
+      content:
+        additionalProperties: true
+        type: object
+      dn:
+        type: string
+    type: object
+  ldap-sync_hooks_unc-group-x.HookResponse:
     properties:
       bindings:
         additionalProperties:
@@ -25,13 +69,14 @@ definitions:
         type: array
       derived:
         items:
-          $ref: '#/definitions/main.DerivedSearchSpec'
+          $ref: '#/definitions/ldap-sync_hooks_unc-group-x.DerivedSearch'
         type: array
       reset:
         type: boolean
       transformed:
         items:
-          $ref: '#/definitions/main.TransformedEntry'
+          additionalProperties: true
+          type: object
         type: array
     type: object
   main.LogLevelRequest:
@@ -64,30 +109,6 @@ definitions:
         type: boolean
       refresh:
         type: integer
-    type: object
-  main.TransformedEntry:
-    properties:
-      content:
-        additionalProperties: true
-        type: object
-      dn:
-        type: string
-    type: object
-  main_hooks_ordrd-group-x.HookRequest:
-    properties:
-      content:
-        additionalProperties: true
-        type: object
-      dn:
-        type: string
-    type: object
-  main_hooks_unc-group-x.HookRequest:
-    properties:
-      content:
-        additionalProperties: true
-        type: object
-      dn:
-        type: string
     type: object
 host: localhost:5500
 info:
@@ -122,14 +143,14 @@ paths:
         name: payload
         required: true
         schema:
-          $ref: '#/definitions/main_hooks_unc-group-x.HookRequest'
+          $ref: '#/definitions/ldap-sync_hooks_unc-group-x.HookRequest'
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/main.HookResponse'
+            $ref: '#/definitions/ldap-sync_hooks_unc-group-x.HookResponse'
       summary: Process LDAP hook payload
   /loglevel:
     get:

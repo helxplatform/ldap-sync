@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/lib/pq"
 	corev1 "k8s.io/api/core/v1"
@@ -227,6 +228,10 @@ type postgresUserPlugin struct {
 	cfg     postgresUserConfig
 	admin   pgAdmin
 	secrets secretClient
+
+	// adminMu serializes admin DDL; concurrent catalog updates raise
+	// "tuple concurrently updated".
+	adminMu sync.Mutex
 }
 
 func newPostgresUserPlugin(cfg postgresUserConfig, admin pgAdmin, secrets secretClient) (*postgresUserPlugin, error) {
@@ -267,7 +272,7 @@ func (p *postgresUserPlugin) Apply(ctx context.Context, e SyncEvent) error {
 	// Resolve the password before touching the role so the role password
 	// always matches what's stored in the secret. Reuse the existing secret's
 	// password if present; otherwise generate a fresh one.
-	secretName := sanitizePGIdentifier(p.cfg.NamePrefix + user)
+	secretName := sanitizeK8sName(p.cfg.NamePrefix + user)
 	existing, err := p.secrets.Get(ctx, p.cfg.Namespace, secretName)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("postgres-user: get secret %q: %w", secretName, err)
@@ -286,16 +291,21 @@ func (p *postgresUserPlugin) Apply(ctx context.Context, e SyncEvent) error {
 	}
 
 	// Ensure all configured group roles exist with their privileges, then
-	// ensure the user login role, then reconcile memberships.
-	for _, spec := range p.cfg.GroupRoles {
-		if err := p.admin.EnsureRole(ctx, spec.Role, spec.Privileges); err != nil {
+	// ensure the user login role, then reconcile memberships. Serialized so
+	// concurrent events don't collide on shared catalog rows.
+	if err := func() error {
+		p.adminMu.Lock()
+		defer p.adminMu.Unlock()
+		for _, spec := range p.cfg.GroupRoles {
+			if err := p.admin.EnsureRole(ctx, spec.Role, spec.Privileges); err != nil {
+				return fmt.Errorf("postgres-user: %w", err)
+			}
+		}
+		if err := p.admin.EnsureLogin(ctx, user, password); err != nil {
 			return fmt.Errorf("postgres-user: %w", err)
 		}
-	}
-	if err := p.admin.EnsureLogin(ctx, user, password); err != nil {
-		return fmt.Errorf("postgres-user: %w", err)
-	}
-	if err := p.reconcileRoles(ctx, user, desiredRoles); err != nil {
+		return p.reconcileRoles(ctx, user, desiredRoles)
+	}(); err != nil {
 		return err
 	}
 
@@ -533,6 +543,24 @@ func sanitizePGIdentifier(name string) string {
 	s = strings.Trim(s, "_")
 	if len(s) > 63 { // Postgres NAMEDATALEN limit.
 		s = strings.TrimRight(s[:63], "_")
+	}
+	return s
+}
+
+// k8sInvalidRun matches runs of characters not allowed in a Kubernetes
+// resource name. Names must be RFC-1123 DNS subdomains: lowercase
+// alphanumerics, '-' and '.' only.
+var k8sInvalidRun = regexp.MustCompile(`[^a-z0-9.-]+`)
+
+// sanitizeK8sName coerces an arbitrary string into a valid RFC-1123 DNS
+// subdomain usable as a resource name. Unlike sanitizePGIdentifier it
+// preserves hyphens (and dots).
+func sanitizeK8sName(name string) string {
+	s := strings.ToLower(name)
+	s = k8sInvalidRun.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-.")
+	if len(s) > 253 { // DNS subdomain max length.
+		s = strings.Trim(s[:253], "-.")
 	}
 	return s
 }
