@@ -8,14 +8,16 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 )
 
 // Global variables for the hook service.
 var (
-	// pidUidMap maintains the mapping from pid to uid
-	pidUidMap = make(map[string]string)
+	// pidUidMap maintains the mapping from pid to uid.
+	// sync.Map is used because hookHandler is called concurrently by Echo.
+	pidUidMap sync.Map
 
 	// baseGid is obtained from a flag and used when processing UNC Users.
 	baseGid string
@@ -234,7 +236,7 @@ func processUNCUser(req HookRequest) HookResponse {
 	if !ok || uid == "" {
 		if pid != "" {
 			log.Printf("UNC User: uid not found or invalid; binding marked null for pid %s", pid)
-			delete(pidUidMap, pid)
+			pidUidMap.Delete(pid)
 		} else {
 			log.Println("UNC User: uid not found or invalid; pid missing")
 		}
@@ -305,7 +307,7 @@ func processUNCUser(req HookRequest) HookResponse {
 	// Update the pidUidMap based on the user's pid.
 	bindings := map[string]*string{}
 	if pid != "" {
-		pidUidMap[pid] = uid
+		pidUidMap.Store(pid, uid)
 		bindings[fmt.Sprintf("pidUidMap.%s", pid)] = &uid
 	}
 
