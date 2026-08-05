@@ -6,9 +6,11 @@ metadata:
   labels:
     {{- include "ldap-sync.labels" . | nindent 4 }}
 rules:
+  # plugin_pvc.go lists (by label selector) then creates; it never gets a PVC
+  # by name, so `get` is dropped.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "create"]
+    verbs: ["list", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -34,9 +36,11 @@ metadata:
   labels:
     {{- include "ldap-sync.labels" . | nindent 4 }}
 rules:
+  # plugin_postgres.go gets a secret by name (computed from NamePrefix+user),
+  # then creates or updates it; it never lists secrets, so `list` is dropped.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create", "update"]
+    verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

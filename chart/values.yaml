@@ -97,7 +97,7 @@ config:
   plugins:
     # Creates a PVC in the release namespace for every synced group
     # entry. When enabled, the chart also installs a Role/RoleBinding
-    # granting the service account get/list/create on PVCs.
+    # granting the service account list/create on PVCs.
     pvcGroup:
       enabled: true
       storageClass: ""
@@ -108,7 +108,7 @@ config:
     # synced user (objectClass helxUser). Roles are granted based on the
     # user's LDAP group memberships via groupRoles below. When enabled, the
     # chart also installs a Role/RoleBinding granting the service account
-    # get/list/create/update on Secrets.
+    # get/create/update on Secrets.
     postgresUser:
       enabled: false
       # Postgres admin connection (admin = the postgres account).
