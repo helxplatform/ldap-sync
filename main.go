@@ -54,6 +54,26 @@ type HookRetryConfig struct {
 	MaxDelayMs     int `yaml:"max_delay_ms"`
 }
 
+// PluginRetryConfig holds retry configuration for plugin Apply calls.
+type PluginRetryConfig struct {
+	MaxAttempts    int `yaml:"max_attempts"`
+	InitialDelayMs int `yaml:"initial_delay_ms"`
+	MaxDelayMs     int `yaml:"max_delay_ms"`
+}
+
+// PluginConfig describes one configured plugin instance.
+type PluginConfig struct {
+	Name    string                 `yaml:"name"`
+	Enabled bool                   `yaml:"enabled"`
+	Options map[string]interface{} `yaml:"options"`
+}
+
+// PluginsConfig groups all plugin configuration.
+type PluginsConfig struct {
+	Retry    PluginRetryConfig `yaml:"retry"`
+	Enabled  []PluginConfig    `yaml:"enabled"`
+}
+
 // Config holds the configuration for both source and target LDAP servers.
 type Config struct {
 	Source    LDAPConfig      `yaml:"source"`
@@ -61,6 +81,7 @@ type Config struct {
 	Hooks     []string        `yaml:"hooks"`
 	Database  DatabaseConfig  `yaml:"database"`
 	HookRetry HookRetryConfig `yaml:"hook_retry"`
+	Plugins   PluginsConfig   `yaml:"plugins"`
 }
 
 // SearchSpec represents a running search instance.
@@ -146,7 +167,7 @@ var db *sql.DB
 
 // ldapStore is the function used to write a transformed entry to the destination
 // LDAP. It is a variable so tests can replace it with a mock without a live server.
-var ldapStore func(*TransformedEntry) error
+var ldapStore func(*TransformedEntry) (SyncOp, error)
 
 // handleEntryWindowHook is called in handleEntry between the first lock release
 // and the second lock acquisition — the exact window where the two-phase race
@@ -155,9 +176,10 @@ var ldapStore func(*TransformedEntry) error
 var handleEntryWindowHook func()
 
 type pendingEntry struct {
-	entry   *TransformedEntry
-	deps    map[string]struct{}
-	rawDeps []string
+	entry    *TransformedEntry
+	deps     map[string]struct{}
+	rawDeps  []string
+	searchID string
 }
 
 type dependencyState struct {
@@ -621,7 +643,7 @@ func collectMissingBindings(entry *TransformedEntry, deps []string, bindings map
 	return keys
 }
 
-func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
+func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string, searchID string) {
 	parentKey := normalizeDN(entry.DN)
 	if parentKey == "" {
 		logger.Error("Transformed entry has empty DN; skipping dependency processing")
@@ -636,6 +658,11 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 		}
 		if len(existing.rawDeps) > 0 {
 			rawDeps = append(rawDeps, existing.rawDeps...)
+		}
+		// Inherit the searchID from the earlier pending entry if the caller
+		// did not supply one, so plugin events keep a stable origin.
+		if searchID == "" {
+			searchID = existing.searchID
 		}
 		for depKey := range existing.deps {
 			parents := d.reverse[depKey]
@@ -698,11 +725,12 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 
 	if len(missing) == 0 && !entryMissing && !depsMissing {
 		d.mu.Unlock()
-		if err := ldapStore(resolvedEntry); err != nil {
+		op, err := ldapStore(resolvedEntry)
+		if err != nil {
 			logger.Error("Error storing entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
 			return
 		}
-		d.markSyncedAndRelease(resolvedEntry.DN)
+		d.markSyncedAndRelease(resolvedEntry.DN, searchID, resolvedEntry.Content, op)
 		return
 	}
 
@@ -730,9 +758,10 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string) {
 	}
 
 	d.pending[parentKey] = &pendingEntry{
-		entry:   entry,
-		deps:    missing,
-		rawDeps: rawDeps,
+		entry:    entry,
+		deps:     missing,
+		rawDeps:  rawDeps,
+		searchID: searchID,
 	}
 	for depKey := range missing {
 		parents := d.reverse[depKey]
@@ -802,11 +831,11 @@ func (d *dependencyState) reprocessPending() {
 			continue
 		}
 		logger.Debug("Reprocessing pending entry", "DN", pending.entry.DN, "RawDeps", len(pending.rawDeps))
-		d.handleEntry(pending.entry, pending.rawDeps)
+		d.handleEntry(pending.entry, pending.rawDeps, pending.searchID)
 	}
 }
 
-func (d *dependencyState) markSyncedAndRelease(dn string) {
+func (d *dependencyState) markSyncedAndRelease(dn string, searchID string, content map[string]interface{}, op SyncOp) {
 	dnKey := normalizeDN(dn)
 	if dnKey == "" {
 		return
@@ -889,16 +918,31 @@ func (d *dependencyState) markSyncedAndRelease(dn string) {
 					"Deferred entry still missing bindings on release",
 					"DN", pending.entry.DN,
 				)
-				d.handleEntry(pending.entry, pending.rawDeps)
+				d.handleEntry(pending.entry, pending.rawDeps, pending.searchID)
 				continue
 			}
-			if err := ldapStore(resolvedEntry); err != nil {
+			pendingOp, err := ldapStore(resolvedEntry)
+			if err != nil {
 				logger.Error("Error storing deferred entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
 				continue
 			}
 			logger.Info("Storing deferred entry in destination LDAP", "DN", resolvedEntry.DN)
-			d.markSyncedAndRelease(resolvedEntry.DN)
+			d.markSyncedAndRelease(resolvedEntry.DN, pending.searchID, resolvedEntry.Content, pendingOp)
 		}
+	}
+
+	// Plugin dispatch fires only after the entry is durably in target LDAP and
+	// outside the dependencyState mutex. An empty op signals "no actual write
+	// happened" (e.g. duplicate markSynced for an already-synced DN), in which
+	// case there is nothing to announce.
+	if op != "" {
+		dispatchSyncEvent(SyncEvent{
+			SearchID:  searchID,
+			DN:        dn,
+			Content:   content,
+			Op:        op,
+			Timestamp: time.Now(),
+		})
 	}
 }
 
@@ -992,7 +1036,7 @@ func performLDAPSearch(l *ldap.Conn, baseDN, filter string) (*ldap.SearchResult,
 	return l.Search(searchRequest)
 }
 
-func storeDestinationLDAP(entry *TransformedEntry) error {
+func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 	lock := getDNLock(entry.DN)
 	lock.Lock()
 	defer lock.Unlock()
@@ -1000,13 +1044,13 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 	// Connect to destination LDAP.
 	l, err := ldap.DialURL(config.Target.URL)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer l.Close()
 
 	// Bind with destination credentials.
 	if err = l.Bind(config.Target.BindDN, config.Target.BindPassword); err != nil {
-		return err
+		return "", err
 	}
 
 	// Check if the entry exists.
@@ -1034,7 +1078,7 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 			// Treat it as if no entry was found.
 			sr = &ldap.SearchResult{Entries: []*ldap.Entry{}}
 		} else {
-			return err
+			return "", err
 		}
 	}
 
@@ -1069,9 +1113,10 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 			addReq.Attribute("objectClass", []string{"top", "inetOrgPerson"})
 		}
 		if err = l.Add(addReq); err != nil {
-			return err
+			return "", err
 		}
 		logger.Info("Added entry to destination LDAP", "DN", entry.DN)
+		return SyncOpCreated, nil
 	} else {
 		entryData := sr.Entries[0]
 		for attr, values := range attributes {
@@ -1095,9 +1140,10 @@ func storeDestinationLDAP(entry *TransformedEntry) error {
 			modReq.Replace(attr, values)
 		}
 		if err = l.Modify(modReq); err != nil {
-			return err
+			return "", err
 		}
 		logger.Info("Modified entry in destination LDAP", "DN", entry.DN)
+		return SyncOpUpdated, nil
 	}
 	return nil
 }
@@ -1157,7 +1203,7 @@ func ldapSearchAndSync(id, filter, baseDN string, refresh int, oneshot bool, sto
 }
 
 // processHookResponse is a stub for processing the hook response.
-func processHookResponse(hookResp HookResponse) {
+func processHookResponse(hookResp HookResponse, sourceSearchID string) {
 	// Log the parsed hook response values.
 	logger.Debug("Processing Hook response", "Transformed", hookResp.Transformed, "Derived", hookResp.Derived, "Reset", hookResp.Reset)
 
@@ -1171,7 +1217,7 @@ func processHookResponse(hookResp HookResponse) {
 		for i := range hookResp.Transformed {
 			transformed := hookResp.Transformed[i]
 			logger.Debug("Processing transformed hook response for DN", "DN", transformed.DN)
-			dependencyTracker.handleEntry(&transformed, hookResp.Dependencies)
+			dependencyTracker.handleEntry(&transformed, hookResp.Dependencies, sourceSearchID)
 		}
 	} else {
 		logger.Info("No transformed data in hook response")
@@ -1296,7 +1342,7 @@ func postToHookWithRetry(hookURL string, payload []byte) (*http.Response, error)
 }
 
 // sendHooks posts the LDAP result to each URL specified in config.Hooks.
-func sendHooks(result LDAPResult) {
+func sendHooks(result LDAPResult, sourceSearchID string) {
 	payload, err := json.Marshal(result)
 	if err != nil {
 		logger.Error("Error marshalling hook payload for DN", "DN", result.DN, "Err", err)
@@ -1324,7 +1370,7 @@ func sendHooks(result LDAPResult) {
 			}
 
 			for _, hookResp := range hookResps {
-				processHookResponse(hookResp)
+				processHookResponse(hookResp, sourceSearchID)
 			}
 		}(url)
 	}
@@ -1383,7 +1429,7 @@ func processLDAPEntry(id string, entry *ldap.Entry, oneshot bool) {
 	}
 
 	if shouldSend {
-		sendHooks(newResult)
+		sendHooks(newResult, id)
 	}
 }
 
