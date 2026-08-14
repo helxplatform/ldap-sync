@@ -1791,6 +1791,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	initPluginRegistry(config.Plugins)
+
 	// Initialize database if enabled in config
 	if config.Database.Enabled {
 		if err := initDB(config.Database); err != nil {
