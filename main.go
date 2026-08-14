@@ -1145,7 +1145,6 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 		logger.Info("Modified entry in destination LDAP", "DN", entry.DN)
 		return SyncOpUpdated, nil
 	}
-	return nil
 }
 
 // ldapSearchAndSync performs the LDAP search on the source server and synchronizes the results.
