@@ -201,19 +201,15 @@ func processORDRDGroup(req HookRequest) HookResponse {
 	// Emit one extra transformed entry per member that patches their groups attribute.
 	// Because groups is a merge attribute in the main service, these accumulate correctly
 	// (e.g. a user in both "users" and "eagle" ends up with groups: [users, eagle]).
-	// Only emitted when helxUser is in the objectClass list; otherwise the destination
-	// LDAP schema won't have the groups attribute type defined.
 	transformedEntries := []map[string]interface{}{transformed}
-	if hasHelxUser() {
-		for _, pid := range memberPids {
-			userGroupPatch := map[string]interface{}{
-				"dn": fmt.Sprintf("uid=$pidUidMap.%s,ou=users,dc=example,dc=org", pid),
-				"content": map[string]interface{}{
-					"groups": []interface{}{groupname},
-				},
-			}
-			transformedEntries = append(transformedEntries, userGroupPatch)
+	for _, pid := range memberPids {
+		userGroupPatch := map[string]interface{}{
+			"dn": fmt.Sprintf("uid=$pidUidMap.%s,ou=users,dc=example,dc=org", pid),
+			"content": map[string]interface{}{
+				"groups": []interface{}{groupname},
+			},
 		}
+		transformedEntries = append(transformedEntries, userGroupPatch)
 	}
 
 	return HookResponse{
@@ -258,20 +254,17 @@ func processUNCUser(req HookRequest) HookResponse {
 
 	// Build the transformed content.
 	newContent := map[string]interface{}{
-		"cn":            req.Content["cn"],
-		"displayName":   req.Content["displayName"],
-		"gidNumber":     baseGid, // Use the global baseGid.
-		"givenName":     req.Content["givenName"],
-		"homeDirectory": fmt.Sprintf("/home/%s", uid),
-		"objectClass":   userObjectClasses,
-		"ou":            "users",
-		"sn":            req.Content["sn"],
-		"uid":           uid,
-		"uidNumber":     req.Content["uidNumber"],
-	}
-	// Only include groups when the destination schema has helxUser loaded.
-	if hasHelxUser() {
-		newContent["groups"] = []interface{}{baseGroup}
+		"cn":                 req.Content["cn"],
+		"displayName":        req.Content["displayName"],
+		"gidNumber":          baseGid, // Use the global baseGid.
+		"givenName":          req.Content["givenName"],
+		"groups":             []interface{}{baseGroup}, // every user belongs to the base group
+		"homeDirectory":      fmt.Sprintf("/home/%s", uid),
+		"objectClass":        userObjectClasses,
+		"ou":                 "users",
+		"sn":                 req.Content["sn"],
+		"uid":                uid,
+		"uidNumber":          req.Content["uidNumber"],
 	}
 
 	transformed := map[string]interface{}{
@@ -402,18 +395,6 @@ func extractCN(dn string) string {
 		}
 	}
 	return ""
-}
-
-// hasHelxUser reports whether "helxUser" is present in the configured
-// userObjectClasses. The groups attribute is only defined in the helxUser
-// schema extension, so it must not be written to destinations that lack it.
-func hasHelxUser() bool {
-	for _, oc := range userObjectClasses {
-		if oc == "helxUser" {
-			return true
-		}
-	}
-	return false
 }
 
 // copyMap creates a shallow copy of a map.
