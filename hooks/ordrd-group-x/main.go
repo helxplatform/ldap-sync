@@ -19,15 +19,6 @@ var (
 
 	// baseGid is obtained from a flag and used when processing UNC Users.
 	baseGid string
-
-	// baseGroup is obtained from a flag and used for the shared posixGroup.
-	baseGroup string
-
-	// userObjectClasses is the objectClass list written to user entries in the
-	// target LDAP. Configurable via --userObjectClasses so the hook can run
-	// against targets that don't have the helxUser schema loaded.
-	userObjectClassesFlag string
-	userObjectClasses     []string
 )
 
 // HookRequest represents the input payload for the /hook endpoint.
@@ -47,9 +38,9 @@ type DerivedSearch struct {
 
 // HookResponse defines the response structure returned by the /hook endpoint.
 type HookResponse struct {
-	Transformed []map[string]interface{} `json:"transformed"` // must be an array so main.go can parse []TransformedEntry
-	Derived     []DerivedSearch          `json:"derived"`
-	Reset       bool                     `json:"reset"`
+	Transformed interface{}     `json:"transformed"`
+	Derived     []DerivedSearch `json:"derived"`
+	Reset       bool            `json:"reset"`
 }
 
 // @Summary Process LDAP hook payload
@@ -125,7 +116,6 @@ func processORDRDGroup(req HookRequest) HookResponse {
 	// Process members – build new member list and derive a filter.
 	newMembers := []string{}
 	filterParts := []string{}
-	memberUids := []string{} // track resolved uids so we can patch each member's groups
 	mappingMissing := false
 
 	for _, m := range memberSlice {
@@ -146,7 +136,6 @@ func processORDRDGroup(req HookRequest) HookResponse {
 			mappingMissing = true
 			break
 		}
-		memberUids = append(memberUids, uid)
 		newVal := fmt.Sprintf("uid=%s,ou=users,dc=example,dc=org", uid)
 		newMembers = append(newMembers, newVal)
 	}
@@ -183,26 +172,8 @@ func processORDRDGroup(req HookRequest) HookResponse {
 		"content": newContent,
 	}
 
-	// Emit one extra transformed entry per member that patches their groups attribute.
-	// Because groups is a merge attribute in the main service, these accumulate correctly
-	// (e.g. a user in both "users" and "eagle" ends up with groups: [users, eagle]).
-	// Only emitted when helxUser is in the objectClass list; otherwise the destination
-	// LDAP schema won't have the groups attribute type defined.
-	transformedEntries := []map[string]interface{}{transformed}
-	if hasHelxUser() {
-		for _, uid := range memberUids {
-			userGroupPatch := map[string]interface{}{
-				"dn": fmt.Sprintf("uid=%s,ou=users,dc=example,dc=org", uid),
-				"content": map[string]interface{}{
-					"groups": []interface{}{groupname},
-				},
-			}
-			transformedEntries = append(transformedEntries, userGroupPatch)
-		}
-	}
-
 	return HookResponse{
-		Transformed: transformedEntries,
+		Transformed: transformed,
 		Derived:     derived,
 		Reset:       false,
 	}
@@ -230,15 +201,11 @@ func processUNCUser(req HookRequest) HookResponse {
 		"gidNumber":     baseGid, // Use the global baseGid.
 		"givenName":     req.Content["givenName"],
 		"homeDirectory": fmt.Sprintf("/home/%s", uid),
-		"objectClass":   userObjectClasses,
+		"objectClass":   []string{"top", "inetOrgPerson", "posixAccount", "helxUser"},
 		"ou":            "users",
 		"sn":            req.Content["sn"],
 		"uid":           uid,
 		"uidNumber":     req.Content["uidNumber"],
-	}
-	// Only include groups when the destination schema has helxUser loaded.
-	if hasHelxUser() {
-		newContent["groups"] = []interface{}{baseGroup}
 	}
 
 	transformed := map[string]interface{}{
@@ -263,7 +230,7 @@ func processUNCUser(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed: []map[string]interface{}{transformed},
+		Transformed: transformed,
 		Derived:     derived,
 		Reset:       false,
 	}
@@ -310,22 +277,10 @@ func processPosixGroup(req HookRequest) HookResponse {
 	}
 
 	return HookResponse{
-		Transformed: []map[string]interface{}{transformed},
+		Transformed: transformed,
 		Derived:     []DerivedSearch{},
 		Reset:       false,
 	}
-}
-
-// hasHelxUser reports whether "helxUser" is present in the configured
-// userObjectClasses. The groups attribute is only defined in the helxUser
-// schema extension, so it must not be written to destinations that lack it.
-func hasHelxUser() bool {
-	for _, oc := range userObjectClasses {
-		if oc == "helxUser" {
-			return true
-		}
-	}
-	return false
 }
 
 // extractGroupName extracts the groupname from a DN expected in the form:
@@ -366,17 +321,7 @@ func copyMap(orig map[string]interface{}) map[string]interface{} {
 func main() {
 	// Accept the baseGid flag. Default value is "200" (adjust as needed).
 	flag.StringVar(&baseGid, "baseGid", "200", "Base gidNumber to use for UNC Users")
-	flag.StringVar(&baseGroup, "baseGroup", "users", "Base group name for all UNC Users")
-	flag.StringVar(&userObjectClassesFlag, "userObjectClasses",
-		"top,inetOrgPerson,posixAccount,helxUser",
-		"Comma-separated objectClass list to assign to synced user entries")
 	flag.Parse()
-
-	for _, oc := range strings.Split(userObjectClassesFlag, ",") {
-		if oc = strings.TrimSpace(oc); oc != "" {
-			userObjectClasses = append(userObjectClasses, oc)
-		}
-	}
 
 	e := echo.New()
 

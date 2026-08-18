@@ -30,11 +30,10 @@ import (
 
 // LDAPConfig holds connection details for one LDAP server.
 type LDAPConfig struct {
-	URL               string   `yaml:"url"`
-	BindDN            string   `yaml:"bind_dn"`
-	BindPassword      string   `yaml:"bind_password"`
-	BaseDN            string   `yaml:"base_dn"`
-	ExcludeAttributes []string `yaml:"exclude_attributes"`
+	URL          string `yaml:"url"`
+	BindDN       string `yaml:"bind_dn"`
+	BindPassword string `yaml:"bind_password"`
+	BaseDN       string `yaml:"base_dn"`
 }
 
 // DatabaseConfig holds database connection details.
@@ -157,7 +156,6 @@ var searchResultsMu sync.RWMutex
 var dependencyTracker = newDependencyState()
 var mergeAttributes = map[string]struct{}{
 	"memberuid": {},
-	"groups":    {}, // merged so per-group patches accumulate rather than overwrite
 }
 var dnLocks sync.Map
 var bindings = make(map[string]string)
@@ -169,12 +167,6 @@ var db *sql.DB
 // ldapStore is the function used to write a transformed entry to the destination
 // LDAP. It is a variable so tests can replace it with a mock without a live server.
 var ldapStore func(*TransformedEntry) (SyncOp, error)
-
-// handleEntryWindowHook is called in handleEntry between the first lock release
-// and the second lock acquisition — the exact window where the two-phase race
-// can occur. It is nil in production; tests set it to a barrier function that
-// holds both goroutines in the window simultaneously, making the race deterministic.
-var handleEntryWindowHook func()
 
 type pendingEntry struct {
 	entry    *TransformedEntry
@@ -351,33 +343,6 @@ func deleteSearchFromDB(id string) error {
 func isMergeAttr(attr string) bool {
 	_, ok := mergeAttributes[strings.ToLower(attr)]
 	return ok
-}
-
-// dropUndefinedAttr inspects err for LDAP result code 17 (Undefined Attribute
-// Type), parses the offending attribute name from the server diagnostic, adds
-// it to skip, and logs a warning. Returns true if the caller should retry the
-// operation without that attribute; returns false if the error is not retryable
-// (wrong code, unparseable message, objectClass, or already skipped).
-func dropUndefinedAttr(err error, dn string, skip map[string]struct{}) bool {
-	ldapErr, ok := err.(*ldap.Error)
-	if !ok || ldapErr.ResultCode != ldap.LDAPResultUndefinedAttributeType {
-		return false
-	}
-	if ldapErr.Err == nil {
-		return false
-	}
-	// OpenLDAP formats the diagnostic as "<attr>: attribute type undefined".
-	parts := strings.SplitN(ldapErr.Err.Error(), ":", 2)
-	attr := strings.TrimSpace(parts[0])
-	if attr == "" || strings.EqualFold(attr, "objectClass") {
-		return false
-	}
-	if _, alreadySkipped := skip[attr]; alreadySkipped {
-		return false
-	}
-	logger.Warn("Attribute not in destination schema, dropping from write", "DN", dn, "Attr", attr)
-	skip[attr] = struct{}{}
-	return true
 }
 
 func isSliceValue(val interface{}) bool {
@@ -705,11 +670,6 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string, se
 	}
 	d.mu.Unlock()
 
-	// Allow tests to stall goroutines here so the two-phase race fires deterministically.
-	if handleEntryWindowHook != nil {
-		handleEntryWindowHook()
-	}
-
 	bindingsSnapshot, nullSnapshot := getBindingsSnapshot()
 	resolvedEntry, entryMissing := resolveEntryTemplates(entry, bindingsSnapshot, nullSnapshot)
 	resolvedDeps, depsMissing := resolveDependencies(rawDeps, bindingsSnapshot, nullSnapshot)
@@ -760,29 +720,6 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string, se
 		}
 		d.markSyncedAndRelease(resolvedEntry.DN, searchID, resolvedEntry.Content, op)
 		return
-	}
-
-	// Another goroutine may have stored a pending entry for the same DN while we
-	// were resolving templates (between the first and second lock acquisitions).
-	// Merge with it now so neither goroutine's content (e.g. groups patches) is lost.
-	if conflicting, ok := d.pending[parentKey]; ok && conflicting.entry != nil {
-		entry.Content = mergeEntryContent(conflicting.entry.Content, entry.Content)
-		rawDeps = append(rawDeps, conflicting.rawDeps...)
-		for depKey := range conflicting.deps {
-			if _, ok := d.synced[depKey]; !ok {
-				missing[depKey] = struct{}{}
-			}
-		}
-		// Remove conflicting entry's reverse-map registrations before overwriting.
-		for depKey := range conflicting.deps {
-			if parents := d.reverse[depKey]; parents != nil {
-				delete(parents, parentKey)
-				if len(parents) == 0 {
-					delete(d.reverse, depKey)
-				}
-			}
-		}
-		logger.Debug("Merged conflicting pending entry in second lock phase", "DN", entry.DN)
 	}
 
 	d.pending[parentKey] = &pendingEntry{
@@ -1082,8 +1019,7 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 	}
 
 	// Check if the entry exists.
-	// Fetch objectClass so we can guard schema-extension attributes (e.g. groups).
-	searchAttrs := []string{"dn", "objectClass"}
+	searchAttrs := []string{"dn"}
 	if len(mergeAttributes) > 0 {
 		for attr := range mergeAttributes {
 			searchAttrs = append(searchAttrs, attr)
@@ -1133,26 +1069,15 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 
 	// If the entry doesn't exist, add it.
 	if len(sr.Entries) == 0 {
-		skip := make(map[string]struct{})
-		for range len(attributes) + 1 {
-			addReq := ldap.NewAddRequest(entry.DN, nil)
-			for attr, values := range attributes {
-				if _, s := skip[attr]; !s {
-					addReq.Attribute(attr, values)
-				}
-			}
-			if _, exists := attributes["objectClass"]; !exists {
-				addReq.Attribute("objectClass", []string{"top", "inetOrgPerson"})
-			}
-			err = l.Add(addReq)
-			if err == nil {
-				break
-			}
-			if !dropUndefinedAttr(err, entry.DN, skip) {
-				return "", err
-			}
+		addReq := ldap.NewAddRequest(entry.DN, nil)
+		for attr, values := range attributes {
+			addReq.Attribute(attr, values)
 		}
-		if err != nil {
+		// Optionally, ensure an objectClass is set.
+		if _, exists := attributes["objectClass"]; !exists {
+			addReq.Attribute("objectClass", []string{"top", "inetOrgPerson"})
+		}
+		if err = l.Add(addReq); err != nil {
 			return "", err
 		}
 		logger.Info("Added entry to destination LDAP", "DN", entry.DN)
@@ -1175,23 +1100,11 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 			attributes[attr] = mergeUnique(existing, values)
 		}
 		// If the entry exists, update it.
-		skip := make(map[string]struct{})
-		for range len(attributes) + 1 {
-			modReq := ldap.NewModifyRequest(entry.DN, nil)
-			for attr, values := range attributes {
-				if _, s := skip[attr]; !s {
-					modReq.Replace(attr, values)
-				}
-			}
-			err = l.Modify(modReq)
-			if err == nil {
-				break
-			}
-			if !dropUndefinedAttr(err, entry.DN, skip) {
-				return "", err
-			}
+		modReq := ldap.NewModifyRequest(entry.DN, nil)
+		for attr, values := range attributes {
+			modReq.Replace(attr, values)
 		}
-		if err != nil {
+		if err = l.Modify(modReq); err != nil {
 			return "", err
 		}
 		logger.Info("Modified entry in destination LDAP", "DN", entry.DN)
@@ -1276,12 +1189,11 @@ func processHookResponse(hookResp HookResponse, sourceSearchID string) {
 
 	// Process each derived search provided.
 	for _, ds := range hookResp.Derived {
-		searchesMu.Lock()
+		searchesMu.RLock()
 		spec, exists := searches[ds.ID]
+		searchesMu.RUnlock()
 		if exists {
-			// Update existing search. Hold the write lock while mutating struct
-			// fields so concurrent readers (e.g. getSearchHandler) see a
-			// consistent snapshot and not a partial write.
+			// Update existing search.
 			close(spec.Stop)
 			stopChan := make(chan struct{})
 			spec.Filter = ds.Filter
@@ -1289,11 +1201,10 @@ func processHookResponse(hookResp HookResponse, sourceSearchID string) {
 			spec.BaseDN = ds.BaseDN
 			spec.Oneshot = ds.Oneshot
 			spec.Stop = stopChan
-			searchesMu.Unlock()
 			go ldapSearchAndSync(ds.ID, ds.Filter, ds.BaseDN, ds.Refresh, ds.Oneshot, stopChan)
 			logger.Info("Derived search updated", "SearchId", ds.ID)
 		} else {
-			// Create a new search. The outer searchesMu.Lock() is still held.
+			// Create a new search.
 			stopChan := make(chan struct{})
 			spec := &SearchSpec{
 				Filter:  ds.Filter,
@@ -1302,6 +1213,7 @@ func processHookResponse(hookResp HookResponse, sourceSearchID string) {
 				Oneshot: ds.Oneshot,
 				Stop:    stopChan,
 			}
+			searchesMu.Lock()
 			searches[ds.ID] = spec
 			searchesMu.Unlock()
 			// Initialize the structured results store for this search id.
@@ -1509,6 +1421,12 @@ func createSearchHandler(c echo.Context) error {
 	if id == "" || filter == "" || refreshStr == "" {
 		return c.String(http.StatusBadRequest, "Missing required parameters (id, filter, refresh)")
 	}
+	searchesMu.RLock()
+	_, exists := searches[id]
+	searchesMu.RUnlock()
+	if exists {
+		return c.String(http.StatusBadRequest, "Search with this id already exists")
+	}
 	refresh, err := strconv.Atoi(refreshStr)
 	if err != nil {
 		return c.String(http.StatusBadRequest, "Invalid refresh parameter")
@@ -1533,13 +1451,7 @@ func createSearchHandler(c echo.Context) error {
 		BaseDN:  baseDN,
 		Oneshot: oneshot,
 	}
-	// Hold write lock for the entire check-and-insert to close the TOCTOU window
-	// between the existence check and the map write.
 	searchesMu.Lock()
-	if _, exists := searches[id]; exists {
-		searchesMu.Unlock()
-		return c.String(http.StatusBadRequest, "Search with this id already exists")
-	}
 	searches[id] = spec
 	searchesMu.Unlock()
 	// Initialize the structured results store for this search id.
