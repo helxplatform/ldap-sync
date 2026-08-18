@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	_ "main/docs" // Replace with your actual module path.
+	_ "ldap-sync/docs"
 
 	"github.com/go-ldap/ldap/v3"
 	"github.com/labstack/echo/v4"
@@ -163,6 +163,10 @@ var nullBindings = make(map[string]struct{})
 var bindingsMu sync.RWMutex
 var bindingPattern = regexp.MustCompile(`\$[A-Za-z0-9_.]+`)
 var db *sql.DB
+
+// ldapStore is the function used to write a transformed entry to the destination
+// LDAP. It is a variable so tests can replace it with a mock without a live server.
+var ldapStore func(*TransformedEntry) (SyncOp, error)
 
 type pendingEntry struct {
 	entry    *TransformedEntry
@@ -709,7 +713,7 @@ func (d *dependencyState) handleEntry(entry *TransformedEntry, deps []string, se
 
 	if len(missing) == 0 && !entryMissing && !depsMissing {
 		d.mu.Unlock()
-		op, err := storeDestinationLDAP(resolvedEntry)
+		op, err := ldapStore(resolvedEntry)
 		if err != nil {
 			logger.Error("Error storing entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
 			return
@@ -882,7 +886,7 @@ func (d *dependencyState) markSyncedAndRelease(dn string, searchID string, conte
 				d.handleEntry(pending.entry, pending.rawDeps, pending.searchID)
 				continue
 			}
-			pendingOp, err := storeDestinationLDAP(resolvedEntry)
+			pendingOp, err := ldapStore(resolvedEntry)
 			if err != nil {
 				logger.Error("Error storing deferred entry in destination LDAP", "DN", resolvedEntry.DN, "Err", err)
 				continue
@@ -1742,6 +1746,7 @@ func main() {
 	flag.StringVar(&loglevel, "loglevel", "", "Set the log level (debug, info, warn, error)")
 	flag.Parse()
 	initLogger(loglevel)
+	ldapStore = storeDestinationLDAP
 
 	// Load configuration from /etc/ldap-sync/config.yaml.
 	if err := loadConfig("/etc/ldap-sync/config.yaml"); err != nil {
