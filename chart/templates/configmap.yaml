@@ -57,3 +57,21 @@ data:
               {{- toYaml .accessModes | nindent 14 }}
         {{- end }}
         {{- end }}
+        {{- with .Values.config.plugins.postgresUser }}
+        {{- if .enabled }}
+        - name: postgres-user
+          enabled: true
+          options:
+            namespace: {{ $.Release.Namespace | quote }}
+            host: {{ .host | quote }}
+            port: {{ .port }}
+            username: {{ .username | quote }}
+            password: {{ .password | quote }}
+            database: {{ .database | quote }}
+            sslmode: {{ .sslmode | default "disable" | quote }}
+            matchObjectClass: {{ .matchObjectClass | default "helxUser" | quote }}
+            namePrefix: {{ .namePrefix | quote }}
+            groupRoles:
+              {{- toYaml .groupRoles | nindent 14 }}
+        {{- end }}
+        {{- end }}

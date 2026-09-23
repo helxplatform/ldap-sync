@@ -55,7 +55,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/main_hooks_unc-group-x.HookRequest"
+                            "$ref": "#/definitions/ldap-sync_hooks_unc-group-x.HookRequest"
                         }
                     }
                 ],
@@ -63,7 +63,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/main.HookResponse"
+                            "$ref": "#/definitions/ldap-sync_hooks_unc-group-x.HookResponse"
                         }
                     }
                 }
@@ -401,7 +401,7 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "main.DerivedSearchSpec": {
+        "ldap-sync_hooks_ordrd-group-x.DerivedSearch": {
             "type": "object",
             "properties": {
                 "baseDN": {
@@ -421,7 +421,73 @@ const docTemplate = `{
                 }
             }
         },
-        "main.HookResponse": {
+        "ldap-sync_hooks_ordrd-group-x.HookRequest": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "ldap-sync_hooks_ordrd-group-x.HookResponse": {
+            "type": "object",
+            "properties": {
+                "derived": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ldap-sync_hooks_ordrd-group-x.DerivedSearch"
+                    }
+                },
+                "reset": {
+                    "type": "boolean"
+                },
+                "transformed": {
+                    "description": "must be an array so main.go can parse []TransformedEntry",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                }
+            }
+        },
+        "ldap-sync_hooks_unc-group-x.DerivedSearch": {
+            "type": "object",
+            "properties": {
+                "baseDN": {
+                    "type": "string"
+                },
+                "filter": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "oneshot": {
+                    "type": "boolean"
+                },
+                "refresh": {
+                    "type": "integer"
+                }
+            }
+        },
+        "ldap-sync_hooks_unc-group-x.HookRequest": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "dn": {
+                    "type": "string"
+                }
+            }
+        },
+        "ldap-sync_hooks_unc-group-x.HookResponse": {
             "type": "object",
             "properties": {
                 "bindings": {
@@ -439,7 +505,7 @@ const docTemplate = `{
                 "derived": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/main.DerivedSearchSpec"
+                        "$ref": "#/definitions/ldap-sync_hooks_unc-group-x.DerivedSearch"
                     }
                 },
                 "reset": {
@@ -448,7 +514,8 @@ const docTemplate = `{
                 "transformed": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/main.TransformedEntry"
+                        "type": "object",
+                        "additionalProperties": true
                     }
                 }
             }
@@ -498,42 +565,6 @@ const docTemplate = `{
                 },
                 "refresh": {
                     "type": "integer"
-                }
-            }
-        },
-        "main.TransformedEntry": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "object",
-                    "additionalProperties": true
-                },
-                "dn": {
-                    "type": "string"
-                }
-            }
-        },
-        "main_hooks_ordrd-group-x.HookRequest": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "object",
-                    "additionalProperties": true
-                },
-                "dn": {
-                    "type": "string"
-                }
-            }
-        },
-        "main_hooks_unc-group-x.HookRequest": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "object",
-                    "additionalProperties": true
-                },
-                "dn": {
-                    "type": "string"
                 }
             }
         }
