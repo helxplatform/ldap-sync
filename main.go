@@ -30,10 +30,11 @@ import (
 
 // LDAPConfig holds connection details for one LDAP server.
 type LDAPConfig struct {
-	URL          string `yaml:"url"`
-	BindDN       string `yaml:"bind_dn"`
-	BindPassword string `yaml:"bind_password"`
-	BaseDN       string `yaml:"base_dn"`
+	URL               string   `yaml:"url"`
+	BindDN            string   `yaml:"bind_dn"`
+	BindPassword      string   `yaml:"bind_password"`
+	BaseDN            string   `yaml:"base_dn"`
+	ExcludeAttributes []string `yaml:"exclude_attributes"`
 }
 
 // DatabaseConfig holds database connection details.
@@ -350,6 +351,33 @@ func deleteSearchFromDB(id string) error {
 func isMergeAttr(attr string) bool {
 	_, ok := mergeAttributes[strings.ToLower(attr)]
 	return ok
+}
+
+// dropUndefinedAttr inspects err for LDAP result code 17 (Undefined Attribute
+// Type), parses the offending attribute name from the server diagnostic, adds
+// it to skip, and logs a warning. Returns true if the caller should retry the
+// operation without that attribute; returns false if the error is not retryable
+// (wrong code, unparseable message, objectClass, or already skipped).
+func dropUndefinedAttr(err error, dn string, skip map[string]struct{}) bool {
+	ldapErr, ok := err.(*ldap.Error)
+	if !ok || ldapErr.ResultCode != ldap.LDAPResultUndefinedAttributeType {
+		return false
+	}
+	if ldapErr.Err == nil {
+		return false
+	}
+	// OpenLDAP formats the diagnostic as "<attr>: attribute type undefined".
+	parts := strings.SplitN(ldapErr.Err.Error(), ":", 2)
+	attr := strings.TrimSpace(parts[0])
+	if attr == "" || strings.EqualFold(attr, "objectClass") {
+		return false
+	}
+	if _, alreadySkipped := skip[attr]; alreadySkipped {
+		return false
+	}
+	logger.Warn("Attribute not in destination schema, dropping from write", "DN", dn, "Attr", attr)
+	skip[attr] = struct{}{}
+	return true
 }
 
 func isSliceValue(val interface{}) bool {
@@ -1054,7 +1082,8 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 	}
 
 	// Check if the entry exists.
-	searchAttrs := []string{"dn"}
+	// Fetch objectClass so we can guard schema-extension attributes (e.g. groups).
+	searchAttrs := []string{"dn", "objectClass"}
 	if len(mergeAttributes) > 0 {
 		for attr := range mergeAttributes {
 			searchAttrs = append(searchAttrs, attr)
@@ -1104,15 +1133,26 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 
 	// If the entry doesn't exist, add it.
 	if len(sr.Entries) == 0 {
-		addReq := ldap.NewAddRequest(entry.DN, nil)
-		for attr, values := range attributes {
-			addReq.Attribute(attr, values)
+		skip := make(map[string]struct{})
+		for range len(attributes) + 1 {
+			addReq := ldap.NewAddRequest(entry.DN, nil)
+			for attr, values := range attributes {
+				if _, s := skip[attr]; !s {
+					addReq.Attribute(attr, values)
+				}
+			}
+			if _, exists := attributes["objectClass"]; !exists {
+				addReq.Attribute("objectClass", []string{"top", "inetOrgPerson"})
+			}
+			err = l.Add(addReq)
+			if err == nil {
+				break
+			}
+			if !dropUndefinedAttr(err, entry.DN, skip) {
+				return "", err
+			}
 		}
-		// Optionally, ensure an objectClass is set.
-		if _, exists := attributes["objectClass"]; !exists {
-			addReq.Attribute("objectClass", []string{"top", "inetOrgPerson"})
-		}
-		if err = l.Add(addReq); err != nil {
+		if err != nil {
 			return "", err
 		}
 		logger.Info("Added entry to destination LDAP", "DN", entry.DN)
@@ -1135,11 +1175,23 @@ func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
 			attributes[attr] = mergeUnique(existing, values)
 		}
 		// If the entry exists, update it.
-		modReq := ldap.NewModifyRequest(entry.DN, nil)
-		for attr, values := range attributes {
-			modReq.Replace(attr, values)
+		skip := make(map[string]struct{})
+		for range len(attributes) + 1 {
+			modReq := ldap.NewModifyRequest(entry.DN, nil)
+			for attr, values := range attributes {
+				if _, s := skip[attr]; !s {
+					modReq.Replace(attr, values)
+				}
+			}
+			err = l.Modify(modReq)
+			if err == nil {
+				break
+			}
+			if !dropUndefinedAttr(err, entry.DN, skip) {
+				return "", err
+			}
 		}
-		if err = l.Modify(modReq); err != nil {
+		if err != nil {
 			return "", err
 		}
 		logger.Info("Modified entry in destination LDAP", "DN", entry.DN)
