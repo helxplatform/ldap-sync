@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -1034,6 +1035,15 @@ func loadConfig(path string) error {
 	return yaml.Unmarshal(data, &config)
 }
 
+// sourceConn is a single bound connection shared by every search goroutine.
+// *ldap.Conn multiplexes concurrent requests internally, so sharing one
+// connection is safe and keeps the bind rate proportional to reconnects rather
+// than to search cycles.
+var (
+	sourceConnMu sync.Mutex
+	sourceConn   *ldap.Conn
+)
+
 // connectAndBindLDAP connects to the LDAP server using the source configuration and binds using the credentials.
 // Returns an established connection or an error.
 func connectAndBindLDAP() (*ldap.Conn, error) {
@@ -1046,6 +1056,54 @@ func connectAndBindLDAP() (*ldap.Conn, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// getSourceConn returns the shared source connection, dialing and binding on
+// first use or after the previous connection was dropped.
+func getSourceConn() (*ldap.Conn, error) {
+	sourceConnMu.Lock()
+	defer sourceConnMu.Unlock()
+
+	if sourceConn != nil && !sourceConn.IsClosing() {
+		return sourceConn, nil
+	}
+
+	l, err := connectAndBindLDAP()
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug("Established source LDAP connection", "URL", config.Source.URL)
+	sourceConn = l
+	return sourceConn, nil
+}
+
+// dropSourceConn closes and clears the shared connection so the next caller
+// redials. The identity check keeps a goroutine that failed on a stale
+// connection from discarding a replacement another goroutine already dialed.
+func dropSourceConn(l *ldap.Conn) {
+	sourceConnMu.Lock()
+	defer sourceConnMu.Unlock()
+
+	if sourceConn != l {
+		return
+	}
+	sourceConn.Close()
+	sourceConn = nil
+}
+
+// isConnectionError reports whether err indicates the connection itself is
+// unusable, as opposed to the server rejecting an otherwise well-formed
+// request. Only the former warrants dropping the shared connection.
+func isConnectionError(err error) bool {
+	var ldapErr *ldap.Error
+	if !errors.As(err, &ldapErr) {
+		return true
+	}
+	switch ldapErr.ResultCode {
+	case ldap.ErrorNetwork, ldap.ErrorUnexpectedMessage, ldap.ErrorUnexpectedResponse:
+		return true
+	}
+	return false
 }
 
 // performLDAPSearch performs an LDAP search using the provided connection, baseDN, and filter.
@@ -1062,6 +1120,32 @@ func performLDAPSearch(l *ldap.Conn, baseDN, filter string) (*ldap.SearchResult,
 		nil,
 	)
 	return l.Search(searchRequest)
+}
+
+// searchSource runs a search on the shared source connection, redialing once if
+// the connection turned out to be stale. Servers commonly drop idle sessions,
+// and the holder only discovers this when a search fails.
+func searchSource(baseDN, filter string) (*ldap.SearchResult, error) {
+	for attempt := 0; ; attempt++ {
+		l, err := getSourceConn()
+		if err != nil {
+			return nil, err
+		}
+
+		sr, err := performLDAPSearch(l, baseDN, filter)
+		if err == nil {
+			return sr, nil
+		}
+		if !isConnectionError(err) {
+			return nil, err
+		}
+
+		dropSourceConn(l)
+		if attempt > 0 {
+			return nil, err
+		}
+		logger.Debug("Source LDAP connection stale, redialing", "BaseDN", baseDN, "Err", err)
+	}
 }
 
 func storeDestinationLDAP(entry *TransformedEntry) (SyncOp, error) {
@@ -1210,9 +1294,9 @@ func ldapSearchAndSync(id, filter, baseDN string, refresh int, oneshot bool, sto
 		}
 
 		logger.Debug("Performing LDAP search with filter", "Filter", filter, "SearchId", id, "BaseDN", baseDN)
-		l, err := connectAndBindLDAP()
+		sr, err := searchSource(baseDN, filter)
 		if err != nil {
-			logger.Error("Error connecting and binding to LDAP", "Err", err)
+			logger.Error("Error performing search", "Err", err, "SearchId", id)
 			select {
 			case <-stopChan:
 				return
@@ -1220,19 +1304,6 @@ func ldapSearchAndSync(id, filter, baseDN string, refresh int, oneshot bool, sto
 			}
 			continue
 		}
-
-		sr, err := performLDAPSearch(l, baseDN, filter)
-		if err != nil {
-			logger.Error("Error performing search", "Err", err)
-			l.Close()
-			select {
-			case <-stopChan:
-				return
-			case <-time.After(time.Duration(refresh) * time.Second):
-			}
-			continue
-		}
-		l.Close()
 
 		for _, entry := range sr.Entries {
 			processLDAPEntry(id, entry, oneshot)
